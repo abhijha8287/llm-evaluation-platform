@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: llm_eval
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+# Redis, the FastAPI app, Celery workers (Linux container per Constraints —
+# Celery's multiprocessing pool is unreliable on native Windows), and the
+# Next.js frontend are added in their respective phases (5, 2, 5, 4/8) rather
+# than stubbed here now — see design doc Next Steps and TODOS.md.
+
+volumes:
+  postgres_data:

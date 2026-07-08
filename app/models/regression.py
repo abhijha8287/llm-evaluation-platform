@@ -1,0 +1,70 @@
+import enum
+from datetime import datetime
+
+from sqlalchemy import DateTime, Float, ForeignKey, String, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+
+
+class RegressionStatus(str, enum.Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    # eng-review D7: a RegressionRun whose baseline was pinned to a different
+    # dataset_version than the current one is never silently diffed — it's
+    # marked NOT_COMPARABLE and the UI must show that explicitly, not a diff.
+    NOT_COMPARABLE = "not_comparable"
+
+
+class RegressionRun(Base):
+    """eng-review D7: pins a Dataset version at creation time. Comparisons only
+    happen between RegressionRuns that share the same dataset_version_id — see
+    services/regression_service.py. Reuses the shared EvaluationService from
+    eng-review D8 rather than duplicating scoring logic."""
+
+    __tablename__ = "regression_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    prompt_version_id: Mapped[int] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="CASCADE"), index=True
+    )
+    baseline_prompt_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    dataset_version_id: Mapped[int] = mapped_column(
+        ForeignKey("dataset_versions.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[RegressionStatus] = mapped_column(String(20), default=RegressionStatus.PENDING)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    prompt_version: Mapped["PromptVersion"] = relationship(foreign_keys=[prompt_version_id])
+    baseline_prompt_version: Mapped["PromptVersion | None"] = relationship(
+        foreign_keys=[baseline_prompt_version_id]
+    )
+    dataset_version: Mapped["DatasetVersion"] = relationship()
+    results: Mapped[list["RegressionResult"]] = relationship(
+        back_populates="regression_run", cascade="all, delete-orphan"
+    )
+
+
+class RegressionResult(Base):
+    __tablename__ = "regression_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    regression_run_id: Mapped[int] = mapped_column(
+        ForeignKey("regression_runs.id", ondelete="CASCADE"), index=True
+    )
+    question_id: Mapped[int] = mapped_column(ForeignKey("questions.id", ondelete="CASCADE"), index=True)
+    metric_name: Mapped[str] = mapped_column(String(30))
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Null when there is no comparable baseline score for this question+metric
+    # (e.g. first-ever run of this prompt template) or when the baseline run's
+    # dataset_version didn't match (status=NOT_COMPARABLE at the run level).
+    delta_from_baseline: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    regression_run: Mapped["RegressionRun"] = relationship(back_populates="results")
+    question: Mapped["Question"] = relationship()
