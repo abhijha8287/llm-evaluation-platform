@@ -18,6 +18,15 @@ Phase 1 (schema) complete: 15 tables, hand-authored initial Alembic migration
 (verified upgrade/downgrade against SQLite; targets Postgres via asyncpg in
 real use), full model test suite passing.
 
+Phase 2 (backend core) complete: repository pattern, LiteLLM runner (D3
+status isolation), JWT auth (D10 login-only/single seeded user), rate-limited
+run-creation endpoint (D2).
+
+Phase 3 (evaluation engine) complete: shared `EvaluationService` (D8) running
+real DeepEval metrics (Faithfulness/Toxicity/Bias/AnswerRelevancy) with
+question-type-aware selection (Premise 3) and per-metric judge-failure
+isolation (D9); seeded/versioned dataset sampler (D5). 27/27 tests passing.
+
 ## Local setup
 
 ```bash

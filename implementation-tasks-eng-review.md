@@ -6,42 +6,66 @@ session, so no JSONL artifact was written for /autoplan aggregation — install 
 if you want that later.
 
 ## Phase 1: Schema
-- [ ] **T1 (P1, human: ~3h / CC: ~20min)** — schema — Create all tables with
+- [x] **T1 (P1, human: ~3h / CC: ~20min)** — schema — Create all tables with
   open-domain/RAG-style Question type split, Response.status,
   EvaluationResult.status, dataset version fields
   - Surfaced by: D3, D5, D7, D9 — status fields and versioning must exist from
     the first migration, not retrofitted
   - Files: `models/*.py`, `migrations/`
   - Verify: `alembic upgrade head` runs clean; a test seeds one row per table
+  - Done: 15 tables, hand-authored migration (no live Postgres in the sandbox
+    to autogenerate against), upgrade+downgrade verified against SQLite,
+    2/2 model tests pass. Found and fixed: eager engine creation at import
+    time coupled every module import to asyncpg being installed — made lazy.
 
 ## Phase 2: Backend core
-- [ ] **T2 (P1, human: ~4h / CC: ~30min)** — llm — LiteLLM runner with
+- [x] **T2 (P1, human: ~4h / CC: ~30min)** — llm — LiteLLM runner with
   per-provider Response.status transitions (success/timeout/failed)
   - Surfaced by: D3
   - Files: `llm/runner.py`, `tests/test_runner.py`
   - Verify: `pytest tests/test_runner.py` covers success/timeout/error/isolation
-- [ ] **T3 (P1, human: ~2h / CC: ~15min)** — auth — Login-only JWT auth, single
+  - Done: 6/6 tests pass. Found and fixed a real bug: `litellm.exceptions.APIError`
+    does NOT cover RateLimitError/AuthenticationError/etc (verified against the
+    installed litellm 1.83.7 exception MRO directly) — a naive except clause
+    would have let those propagate uncaught instead of isolating the failure.
+    Fixed to catch `openai.OpenAIError`, the actual shared base.
+- [x] **T3 (P1, human: ~2h / CC: ~15min)** — auth — Login-only JWT auth, single
   seeded demo user, no public registration endpoint
   - Surfaced by: D10
   - Files: `api/routes/auth.py`, `core/seed_data.py`
   - Verify: registration route returns 404/disabled; login issues valid JWT
-- [ ] **T4 (P1, human: ~1h / CC: ~10min)** — api — Rate limit on trigger-run
+  - Done: 4/4 tests pass. Found and fixed: `passlib` is incompatible with
+    modern `bcrypt` (removed `__about__`, and passlib's internal self-test
+    trips bcrypt's 72-byte limit) — replaced with direct `bcrypt` usage.
+- [x] **T4 (P1, human: ~1h / CC: ~10min)** — api — Rate limit on trigger-run
   endpoint, enforced regardless of auth state
   - Surfaced by: D2
   - Files: `api/routes/runs.py`
   - Verify: test fires 4 requests, 4th is rejected
+  - Done: 3/3 tests pass (401 unauthenticated, 404 unowned project, rate limit
+    fires on the 3rd request against a MAX_RUNS_PER_DAY=2 override).
 
 ## Phase 3: Evaluation engine
-- [ ] **T5 (P1, human: ~4h / CC: ~30min)** — evaluation — Shared
+- [x] **T5 (P1, human: ~4h / CC: ~30min)** — evaluation — Shared
   EvaluationService (question-type-aware metric selection, judge failure status)
   - Surfaced by: D8, D9
   - Files: `evaluation/scoring_service.py`, `tests/test_scoring_service.py`
   - Verify: open-domain vs RAG-style branch tests; judge-failure exclusion test
-- [ ] **T6 (P2, human: ~1h / CC: ~10min)** — sampler — Seeded, versioned dataset
+  - Done: 5/5 tests pass. Verified against the installed deepeval 4.0.7
+    directly (not assumed): FaithfulnessMetric._required_params confirms
+    RAG-only status; metric construction requires an API key eagerly (even
+    before any network call), so the judge is built with an explicit
+    GPTModel(model, api_key) rather than relying on OPENAI_API_KEY being
+    present in the process environment — an implicit-env-var footgun this
+    project would otherwise have shipped with.
+- [x] **T6 (P2, human: ~1h / CC: ~10min)** — sampler — Seeded, versioned dataset
   sampling
   - Surfaced by: D5
   - Files: `services/dataset_sampler.py`
   - Verify: same version → identical sample across repeated calls
+  - Done: 7/7 tests pass — determinism, cross-order stability, oversized
+    sample_size, version auto-increment, and DatasetVersionQuestion
+    materialization all verified against a real (temp-file SQLite) DB.
 
 ## Phase 5: Async layer
 - [ ] **T7 (P1, human: ~3h / CC: ~20min)** — workers — Celery task per
