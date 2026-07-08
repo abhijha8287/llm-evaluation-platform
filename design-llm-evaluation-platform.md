@@ -219,3 +219,33 @@ placeholder code, stop for review after each per the original spec):
 - You explicitly chose "full spec, time-boxed" over a scoped-down MVP even after I
   named the abandonment risk — that's a real bet on ambition; the staged build order
   above is designed to hedge that bet without diluting it.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 13 issues, 13 resolved |
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+**Locked-in architecture decisions (D1-D13):**
+
+1. **Celery/async bridge** — `asyncio.run()` wrapper inside each Celery task; eval/LiteLLM code stays fully async.
+2. **Public demo abuse prevention** — read-only public access; trigger-run endpoint rate-limited (e.g. 3 new runs/day) regardless of auth.
+3. **Provider failure isolation** — `Response.status` (pending/success/failed/timeout); one failed provider never blocks or corrupts the other N-1.
+4. **Elo concurrency** — row-level lock (`SELECT ... FOR UPDATE`) around Elo updates; no dropped updates under concurrent comparisons.
+5. **Sample determinism** — fixed, seeded sample per dataset version; every provider scored on identical questions for fair leaderboard comparison.
+6. **Pricing data source** — LiteLLM's built-in pricing map (`litellm.model_cost`), not a hand-maintained Costs table.
+7. **Regression snapshot** — `RegressionRun` pins a dataset version at creation; mismatched-version comparisons are rejected as "not comparable," never silently diffed.
+8. **DRY eval scoring** — one shared `EvaluationService` used by both live eval (Phase 3) and regression re-scoring (Phase 7).
+9. **Judge failure status** — `EvaluationResult.status` field; failed judge calls excluded from averages, never counted as a real 0.
+10. **Auth model** — login-only with a single seeded demo user for the public deploy; no open self-registration.
+11. **Test coverage** — every phase ships its own tests in the same commit as the feature code, no deferral to a follow-up pass.
+12. **Task granularity** — one Celery task per (question, provider) pair, not one task per Run, so horizontal worker scaling actually helps.
+13. **Leaderboard caching** — Redis cache for leaderboard aggregates, invalidated on new `EvaluationResult` writes.
+
+**CODEX:** not run — outside voice was not invoked this session.
+**VERDICT:** ENG REVIEW CLEARED (13/13 findings resolved) — ready to implement Phase 1. CEO Review and Design Review not run; optional, recommended before UI-heavy phases (4, 8) if scope/UX confidence is wanted.
+
+NO UNRESOLVED DECISIONS
