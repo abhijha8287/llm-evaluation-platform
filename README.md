@@ -25,7 +25,40 @@ run-creation endpoint (D2).
 Phase 3 (evaluation engine) complete: shared `EvaluationService` (D8) running
 real DeepEval metrics (Faithfulness/Toxicity/Bias/AnswerRelevancy) with
 question-type-aware selection (Premise 3) and per-metric judge-failure
-isolation (D9); seeded/versioned dataset sampler (D5). 27/27 tests passing.
+isolation (D9); seeded/versioned dataset sampler (D5).
+
+Phase 4 (minimal frontend + first end-to-end demoable milestone) complete:
+`RunOrchestrator` connects the LiteLLM runner, DeepEval scoring, and cost
+service into one synchronous run-execution path; public leaderboard API;
+seeded demo models/dataset; Next.js 16 frontend (leaderboard, login,
+trigger-run panel). 45/45 backend tests passing. Live-smoke-tested end to
+end: real backend + real frontend dev server, curl-verified against
+`/health`, `/leaderboard`, `/auth/login`, `/me/run-context`, and CORS.
+
+## Running locally
+
+Backend:
+```bash
+python -m venv .venv && .venv/Scripts/activate    # or source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env    # fill in real provider API keys
+docker compose up -d postgres
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+Frontend (separate terminal):
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The frontend defaults to `NEXT_PUBLIC_API_URL=http://localhost:8000` (see
+`frontend/.env.local`). The backend seeds a demo user
+(`demo@llm-eval-platform.dev` / `demo-password-change-me` — change this in
+`app/main.py` before any real deploy), 3 models, and a demo dataset on
+startup.
 
 ## Local setup
 

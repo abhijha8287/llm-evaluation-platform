@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, func
+from sqlalchemy import DateTime, Enum as SAEnum, Float, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -36,7 +36,9 @@ class Comparison(Base):
         ForeignKey("llm_models.id", ondelete="SET NULL"), nullable=True
     )
 
-    voter_type: Mapped[VoterType] = mapped_column(String(20))
+    # SAEnum, not String — see question.py's comment; a plain String column
+    # silently loses the Python enum type on every fresh load from the DB.
+    voter_type: Mapped[VoterType] = mapped_column(SAEnum(VoterType, native_enum=False, length=20))
     elo_delta_a: Mapped[float] = mapped_column(Float)
     elo_delta_b: Mapped[float] = mapped_column(Float)
 

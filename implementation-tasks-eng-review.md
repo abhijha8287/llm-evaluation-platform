@@ -67,17 +67,72 @@ if you want that later.
     sample_size, version auto-increment, and DatasetVersionQuestion
     materialization all verified against a real (temp-file SQLite) DB.
 
+## Phase 4: Minimal frontend + synchronous run execution
+Not in the original T-list (D1-D13 were mostly backend-architecture decisions) —
+added here because Phase 4 needed real backend wiring to be an actual "first
+end-to-end demoable milestone," not just a frontend shell calling
+not-yet-functional endpoints (which the office-hours design doc's "no
+placeholder code" rule rules out).
+- [x] **T8 (P2, human: ~2h / CC: ~15min)** — cost — Cost service reading
+  LiteLLM's pricing map, null (not zero) for unknown models
+  - Surfaced by: D6, plus the cost-service gap noted in the failure-mode table
+  - Files: `services/cost_service.py`
+  - Verify: known-model test + explicit missing-model-returns-null test
+  - Done: pulled forward from Phase 5 — cheap once Phase 2 already verified
+    litellm.model_cost is accessible, and leaving cost_usd permanently null
+    on every Response would itself have been the placeholder-code anti-pattern.
+    3/3 tests pass.
+- [x] **T-orchestrator (P1)** — `services/run_orchestrator.py` — connects
+  LLMRunner + EvaluationService + cost_service; persists Response/
+  EvaluationResult rows per (question, model) pair; structured as one unit
+  of work per pair already so Phase 5's Celery migration (D12) is mechanical.
+  2/2 tests pass (full persistence + D3 failure isolation at orchestration level).
+- [x] **T-leaderboard (P1)** — `api/routes/leaderboard.py` — public, no-auth
+  GET endpoint aggregating per-model Elo/latency/cost/metric averages,
+  excluding non-SUCCESS Responses (D3) and EvaluationResults (D9) from
+  averages. 4/4 tests pass. Caught a real bug: `str(MetricName.TOXICITY)`
+  returns `"MetricName.TOXICITY"`, not `"toxicity"` (standard `str,Enum`
+  `__str__` behavior) — fixed to use `.value`.
+- [x] **T-runs-wiring (P1)** — `api/routes/runs.py` — POST /runs now actually
+  executes the orchestrator synchronously and returns the completed Run;
+  `LLMRunner`/`EvaluationService` moved to FastAPI dependencies
+  (`get_llm_runner`/`get_evaluation_service`) so tests can override them with
+  fakes instead of making real provider/judge API calls. 6/6 tests pass.
+- [x] **T-context (P1)** — `api/routes/context.py` — `GET /me/run-context` so
+  the frontend never hardcodes project/dataset-version/model IDs. 3/3 tests pass.
+- [x] **T-schema-fix (P1, cross-cutting)** — all 6 enum columns
+  (Question.type, Run.status, Response.status, EvaluationResult.status/
+  metric_name, Comparison.voter_type, RegressionRun.status) were using plain
+  `String(N)`, which silently loses the Python enum type on every fresh load
+  from the DB (returns a raw `str` — `==` comparisons still work via str
+  equality, but `.value`/`isinstance()` would break, and did break in a test
+  before the fix). Switched to `sqlalchemy.Enum(..., native_enum=False,
+  length=N)`, verified to produce identical DDL (no migration change needed)
+  while correctly round-tripping the enum type.
+- [x] **T-frontend (P1)** — `frontend/` — Next.js 16 (App Router, TypeScript,
+  Tailwind v4; design doc said "15," 16 is current stable as of this build —
+  see AGENTS.md's breaking-changes note, checked before writing any page
+  code). Public leaderboard page, login page (D10: no registration form
+  anywhere), trigger-run panel with model selection + rate-limit error
+  display. `useSyncExternalStore` for the auth token (not useState+useEffect
+  — the newer `react-hooks/set-state-in-effect` lint rule correctly flagged
+  that pattern as an anti-pattern for external stores). Builds, type-checks,
+  and lints clean. CORS switched from a hardcoded port to a localhost regex
+  after discovering an unrelated pre-existing app was already squatting port
+  3000 on the dev machine, which would have silently broken CORS for anyone
+  hitting the same collision.
+  - Verify: full live smoke test — real backend (SQLite-substituted, no
+    Postgres available in this sandbox) + real frontend dev server, curl
+    against `/health`, `/leaderboard`, `/auth/login` (real JWT issued),
+    `/me/run-context`, and a CORS preflight check, all passing against
+    actually-running processes, not just mocked unit tests.
+
 ## Phase 5: Async layer
 - [ ] **T7 (P1, human: ~3h / CC: ~20min)** — workers — Celery task per
   (question, provider) pair with asyncio.run() bridge
   - Surfaced by: D1, D12
   - Files: `workers/eval_tasks.py`
   - Verify: test asserts N tasks enqueued for N pairs, not 1 per Run
-- [ ] **T8 (P2, human: ~2h / CC: ~15min)** — cost — Cost service reading
-  LiteLLM's pricing map, null (not zero) for unknown models
-  - Surfaced by: D6, plus the cost-service gap noted in the failure-mode table
-  - Files: `services/cost_service.py`
-  - Verify: known-model test + explicit missing-model-returns-null test
 
 ## Phase 6: Arena/Elo
 - [ ] **T9 (P1, human: ~2h / CC: ~15min)** — elo — Row-level locked Elo updates

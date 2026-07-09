@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Enum as SAEnum, Float, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -37,8 +37,12 @@ class EvaluationResult(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     response_id: Mapped[int] = mapped_column(ForeignKey("responses.id", ondelete="CASCADE"), index=True)
-    metric_name: Mapped[MetricName] = mapped_column(String(30))
-    status: Mapped[EvaluationStatus] = mapped_column(String(20), default=EvaluationStatus.PENDING)
+    # SAEnum, not String — see question.py's comment; a plain String column
+    # silently loses the Python enum type on every fresh load from the DB.
+    metric_name: Mapped[MetricName] = mapped_column(SAEnum(MetricName, native_enum=False, length=30))
+    status: Mapped[EvaluationStatus] = mapped_column(
+        SAEnum(EvaluationStatus, native_enum=False, length=20), default=EvaluationStatus.PENDING
+    )
 
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)

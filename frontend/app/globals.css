@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+/* Fixed dark theme — this is an internal eval-tooling dashboard, not a
+   consumer product, so no light/dark toggle for this phase. Body background
+   and text color are set via Tailwind classes directly on <body> in
+   app/layout.tsx. */
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}

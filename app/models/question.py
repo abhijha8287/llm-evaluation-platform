@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -22,7 +22,14 @@ class Question(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     dataset_id: Mapped[int] = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"), index=True)
-    type: Mapped[QuestionType] = mapped_column(String(20))
+    # eng-review follow-up (Phase 4): SAEnum(..., native_enum=False), not a
+    # plain String — verified that a plain String column loses the Python
+    # enum type on every fresh load (returns a raw str), which silently
+    # breaks any code relying on .value or isinstance() after a DB round-trip
+    # (== comparisons still work via str equality, so this bug is easy to
+    # miss until something calls .value). Applied consistently across every
+    # enum column in this schema, not just this one.
+    type: Mapped[QuestionType] = mapped_column(SAEnum(QuestionType, native_enum=False, length=20))
     text: Mapped[str] = mapped_column(Text)
     # Required when type == RAG, must be null when type == OPEN_DOMAIN.
     # Enforced in the repository layer (see repositories/question_repository.py)

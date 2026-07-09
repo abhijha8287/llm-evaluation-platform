@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, func
+from sqlalchemy import DateTime, Enum as SAEnum, Float, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -36,7 +36,11 @@ class RegressionRun(Base):
     dataset_version_id: Mapped[int] = mapped_column(
         ForeignKey("dataset_versions.id", ondelete="RESTRICT"), index=True
     )
-    status: Mapped[RegressionStatus] = mapped_column(String(20), default=RegressionStatus.PENDING)
+    # SAEnum, not String — see question.py's comment; a plain String column
+    # silently loses the Python enum type on every fresh load from the DB.
+    status: Mapped[RegressionStatus] = mapped_column(
+        SAEnum(RegressionStatus, native_enum=False, length=20), default=RegressionStatus.PENDING
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

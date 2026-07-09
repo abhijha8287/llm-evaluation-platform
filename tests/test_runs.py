@@ -1,13 +1,23 @@
 """Task T4 verify: rate limit fires after the configured number of requests,
-and only after successful auth + project/dataset-version validation."""
+and only after successful auth + project/dataset-version/model validation.
+Also verifies Phase 4's wiring: a successful run actually persists Responses
+and EvaluationResults (via the fake runner/evaluator injected by
+tests/conftest.py's test_client fixture — no real provider or judge calls)."""
+
+from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.core.deps import get_llm_runner
 from app.core.security import create_access_token
 from app.models.dataset import Dataset, DatasetVersion
+from app.models.evaluation_result import EvaluationResult
+from app.models.llm_model import LLMModel
 from app.models.project import Project
+from app.models.question import Question, QuestionType
+from app.models.response import Response
 
 
-async def _seed_project_and_dataset_version(session_factory, owner_id: int) -> tuple[int, int]:
+async def _seed_project_dataset_and_model(session_factory, owner_id: int) -> tuple[int, int, int]:
     async with session_factory() as session:
         project = Project(owner_id=owner_id, name="Test Project")
         session.add(project)
@@ -17,17 +27,41 @@ async def _seed_project_and_dataset_version(session_factory, owner_id: int) -> t
         session.add(dataset)
         await session.flush()
 
-        dataset_version = DatasetVersion(dataset_id=dataset.id, version_number=1, sample_seed=1, sample_size=5)
+        question = Question(dataset_id=dataset.id, type=QuestionType.OPEN_DOMAIN, text="Q1")
+        session.add(question)
+        await session.flush()
+
+        dataset_version = DatasetVersion(dataset_id=dataset.id, version_number=1, sample_seed=1, sample_size=1)
         session.add(dataset_version)
         await session.flush()
 
+        from app.models.dataset import DatasetVersionQuestion
+
+        session.add(DatasetVersionQuestion(dataset_version_id=dataset_version.id, question_id=question.id))
+
+        model = LLMModel(provider="openai", name="gpt-4o-mini", display_name="GPT-4o mini")
+        session.add(model)
+        await session.flush()
+
         await session.commit()
-        return project.id, dataset_version.id
+        return project.id, dataset_version.id, model.id
 
 
 async def test_create_run_requires_auth(test_client):
-    response = await test_client.post("/runs", json={"project_id": 1, "dataset_version_id": 1})
+    response = await test_client.post(
+        "/runs", json={"project_id": 1, "dataset_version_id": 1, "model_ids": [1]}
+    )
     assert response.status_code == 401
+
+
+async def test_create_run_rejects_empty_model_ids(test_client, seeded_demo_user):
+    token = create_access_token(subject=str(seeded_demo_user.id))
+    response = await test_client.post(
+        "/runs",
+        json={"project_id": 1, "dataset_version_id": 1, "model_ids": []},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 400
 
 
 async def test_create_run_rejects_unowned_project(test_client, session_factory, seeded_demo_user):
@@ -46,31 +80,67 @@ async def test_create_run_rejects_unowned_project(test_client, session_factory, 
         await session.flush()
         other_version = DatasetVersion(dataset_id=other_dataset.id, version_number=1, sample_seed=1, sample_size=1)
         session.add(other_version)
+        model = LLMModel(provider="openai", name="gpt-4o-mini", display_name="GPT-4o mini")
+        session.add(model)
         await session.flush()
         await session.commit()
-        other_project_id, other_version_id = other_project.id, other_version.id
+        other_project_id, other_version_id, model_id = other_project.id, other_version.id, model.id
 
     token = create_access_token(subject=str(seeded_demo_user.id))
     response = await test_client.post(
         "/runs",
-        json={"project_id": other_project_id, "dataset_version_id": other_version_id},
+        json={"project_id": other_project_id, "dataset_version_id": other_version_id, "model_ids": [model_id]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 404
 
 
-async def test_create_run_succeeds_and_is_rate_limited(test_client, session_factory, seeded_demo_user, monkeypatch):
+async def test_create_run_rejects_unknown_model_id(test_client, session_factory, seeded_demo_user):
+    project_id, dataset_version_id, _model_id = await _seed_project_dataset_and_model(
+        session_factory, seeded_demo_user.id
+    )
+    token = create_access_token(subject=str(seeded_demo_user.id))
+    response = await test_client.post(
+        "/runs",
+        json={"project_id": project_id, "dataset_version_id": dataset_version_id, "model_ids": [999999]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 404
+
+
+async def test_create_run_succeeds_persists_results_and_is_rate_limited(
+    test_client, session_factory, seeded_demo_user, monkeypatch
+):
     monkeypatch.setenv("MAX_RUNS_PER_DAY", "2")
     get_settings.cache_clear()
 
-    project_id, dataset_version_id = await _seed_project_and_dataset_version(session_factory, seeded_demo_user.id)
+    project_id, dataset_version_id, model_id = await _seed_project_dataset_and_model(
+        session_factory, seeded_demo_user.id
+    )
     token = create_access_token(subject=str(seeded_demo_user.id))
     headers = {"Authorization": f"Bearer {token}"}
-    body = {"project_id": project_id, "dataset_version_id": dataset_version_id}
+    body = {"project_id": project_id, "dataset_version_id": dataset_version_id, "model_ids": [model_id]}
 
     first = await test_client.post("/runs", json=body, headers=headers)
     assert first.status_code == 201
-    assert first.json()["status"] == "pending"
+    assert first.json()["status"] == "completed"
+    assert first.json()["completed_at"] is not None
+
+    async with session_factory() as session:
+        responses = (
+            (await session.execute(select(Response).where(Response.run_id == first.json()["id"])))
+            .scalars()
+            .all()
+        )
+        assert len(responses) == 1  # 1 question x 1 model
+        assert responses[0].status.value == "success"
+
+        eval_results = (
+            (await session.execute(select(EvaluationResult).where(EvaluationResult.response_id == responses[0].id)))
+            .scalars()
+            .all()
+        )
+        assert len(eval_results) == 1  # fake evaluator returns one TOXICITY score
 
     second = await test_client.post("/runs", json=body, headers=headers)
     assert second.status_code == 201
@@ -79,3 +149,47 @@ async def test_create_run_succeeds_and_is_rate_limited(test_client, session_fact
     assert third.status_code == 429
 
     get_settings.cache_clear()
+
+
+async def test_create_run_isolates_model_failure(test_client, session_factory, seeded_demo_user):
+    """eng-review D3 at the HTTP layer: a failed provider call still returns
+    201 with the run completed — the failure is recorded per-Response, not
+    surfaced as an endpoint-level error."""
+    from app.main import app
+    from tests.conftest import make_fake_llm_runner
+    from app.llm.runner import RunResult
+    from app.models.response import ResponseStatus
+
+    project_id, dataset_version_id, model_id = await _seed_project_dataset_and_model(
+        session_factory, seeded_demo_user.id
+    )
+
+    failing_runner = make_fake_llm_runner()
+    failing_runner.run.return_value = RunResult(status=ResponseStatus.FAILED, error_message="rate limited")
+    app.dependency_overrides[get_llm_runner] = lambda: failing_runner
+
+    token = create_access_token(subject=str(seeded_demo_user.id))
+    response = await test_client.post(
+        "/runs",
+        json={"project_id": project_id, "dataset_version_id": dataset_version_id, "model_ids": [model_id]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "completed"
+
+    async with session_factory() as session:
+        responses = (
+            (await session.execute(select(Response).where(Response.run_id == response.json()["id"])))
+            .scalars()
+            .all()
+        )
+        assert len(responses) == 1
+        assert responses[0].status.value == "failed"
+
+        eval_results = (
+            (await session.execute(select(EvaluationResult).where(EvaluationResult.response_id == responses[0].id)))
+            .scalars()
+            .all()
+        )
+        assert len(eval_results) == 0  # never scored — no output to evaluate

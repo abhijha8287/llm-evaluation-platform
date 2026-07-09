@@ -1,6 +1,7 @@
 import os
 import tempfile
 import uuid
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest_asyncio
@@ -8,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.models  # noqa: F401 - populates Base.metadata; must import before any create_all
 from app.core.database import Base, get_session
+from app.core.deps import get_evaluation_service, get_llm_runner
+from app.evaluation.scoring_service import EvaluationService, MetricScore
+from app.llm.runner import LLMRunner, RunResult
+from app.models.evaluation_result import EvaluationStatus, MetricName
+from app.models.response import ResponseStatus
 
 # SQLite in-memory for schema/model tests (Task T1). Postgres-specific
 # behavior (row-level locking for D4's Elo updates, etc.) is exercised
@@ -45,11 +51,49 @@ async def db_session(session_factory) -> AsyncSession:
         yield session
 
 
+def make_fake_llm_runner(default_output: str = "fake answer") -> LLMRunner:
+    """Never makes a real provider call. Default: every call succeeds with a
+    canned output — tests that need specific per-model/per-failure behavior
+    reassign .run's side_effect after construction (see test_runs.py)."""
+    runner = LLMRunner()
+    runner.run = AsyncMock(
+        return_value=RunResult(
+            status=ResponseStatus.SUCCESS,
+            output=default_output,
+            latency_ms=100,
+            prompt_tokens=10,
+            completion_tokens=5,
+        )
+    )
+    return runner
+
+
+def make_fake_evaluation_service() -> EvaluationService:
+    """Never constructs a real GPTModel (which requires an API key even to
+    construct — see Phase 3 eng-review note) and never calls a real judge."""
+    service = EvaluationService.__new__(EvaluationService)
+    service.judge_model_name = "gpt-4o-mini"
+    service.score_response = AsyncMock(
+        return_value=[
+            MetricScore(metric_name=MetricName.TOXICITY, status=EvaluationStatus.SUCCESS, score=0.05, reason="fine")
+        ]
+    )
+    return service
+
+
 @pytest_asyncio.fixture
 async def test_client(session_factory):
     """FastAPI app wired to the SQLite test DB via a get_session override.
     Does NOT run the production lifespan (which seeds via a Postgres-backed
-    engine) — see the seeded_demo_user fixture for the test-DB equivalent."""
+    engine) — see the seeded_demo_user fixture for the test-DB equivalent.
+
+    get_llm_runner/get_evaluation_service are overridden with safe fakes by
+    default — FastAPI resolves ALL declared Depends() for a route before the
+    route body runs, so even a request that will 404 early (e.g. unowned
+    project) would otherwise try to construct a real EvaluationService,
+    which requires a real API key just to construct. Tests that need
+    specific run-execution behavior reassign the fake's .run/.score_response
+    after the fixture yields the client."""
     from app.main import app
 
     async def override_get_session():
@@ -57,6 +101,8 @@ async def test_client(session_factory):
             yield session
 
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_llm_runner] = lambda: make_fake_llm_runner()
+    app.dependency_overrides[get_evaluation_service] = lambda: make_fake_evaluation_service()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
