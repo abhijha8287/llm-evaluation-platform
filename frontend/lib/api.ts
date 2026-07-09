@@ -1,8 +1,17 @@
 import type {
   ArenaComparisonOption,
+  Dataset,
+  DatasetQuestion,
   LeaderboardEntry,
+  Project,
+  PromptTemplate,
+  PromptVersion,
+  RegressionRunDetail,
+  RegressionRunResponse,
   RunContext,
+  RunListItem,
   RunResponse,
+  RunTrendPoint,
   TokenResponse,
   VoteRequest,
   VoteResponse,
@@ -111,6 +120,124 @@ export async function submitVote(body: VoteRequest): Promise<VoteResponse> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getProjects(): Promise<Project[]> {
+  const response = await fetch(`${API_URL}/projects`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getProjectDatasets(projectId: number): Promise<Dataset[]> {
+  const response = await fetch(`${API_URL}/projects/${projectId}/datasets`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getDatasetQuestions(datasetId: number): Promise<DatasetQuestion[]> {
+  const response = await fetch(`${API_URL}/datasets/${datasetId}/questions`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getRuns(projectId: number): Promise<RunListItem[]> {
+  const response = await fetch(`${API_URL}/runs?project_id=${projectId}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getTrends(projectId: number): Promise<RunTrendPoint[]> {
+  const response = await fetch(`${API_URL}/dashboard/trends?project_id=${projectId}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getPromptTemplates(projectId: number): Promise<PromptTemplate[]> {
+  const response = await fetch(`${API_URL}/prompt-templates?project_id=${projectId}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function createPromptTemplate(
+  token: string,
+  body: { project_id: number; name: string },
+): Promise<PromptTemplate> {
+  const response = await fetch(`${API_URL}/prompt-templates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function createPromptVersion(
+  token: string,
+  promptTemplateId: number,
+  content: string,
+): Promise<PromptVersion> {
+  const response = await fetch(`${API_URL}/prompt-templates/${promptTemplateId}/versions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function createRegressionRun(
+  token: string,
+  body: {
+    prompt_version_id: number;
+    dataset_version_id: number;
+    model_id: number;
+    baseline_prompt_version_id?: number | null;
+  },
+): Promise<RegressionRunResponse> {
+  const response = await fetch(`${API_URL}/regression-runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getRegressionRuns(promptTemplateId: number): Promise<RegressionRunResponse[]> {
+  const response = await fetch(
+    `${API_URL}/regression-runs?prompt_template_id=${promptTemplateId}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getRegressionRun(regressionRunId: number): Promise<RegressionRunDetail> {
+  const response = await fetch(`${API_URL}/regression-runs/${regressionRunId}`, { cache: "no-store" });
   if (!response.ok) {
     throw new ApiError(await parseErrorDetail(response), response.status);
   }

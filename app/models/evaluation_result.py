@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum as SAEnum, Float, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Float, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -45,6 +45,13 @@ class EvaluationResult(Base):
     )
 
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Phase 8: captured directly from DeepEval's own metric.success, not
+    # reimplemented — pass/fail direction differs by metric (Faithfulness/
+    # AnswerRelevancy pass when score >= threshold; Toxicity/Bias pass when
+    # score <= threshold), verified against the installed library rather
+    # than assumed. Null when status != SUCCESS (no score means no pass/fail
+    # verdict either).
+    passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 

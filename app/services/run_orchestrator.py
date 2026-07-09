@@ -54,8 +54,19 @@ class RunOrchestrator:
 
         await RunRepository(self.session).mark_completed(run)
 
-    async def run_pair(self, run: Run, question: Question, model: LLMModel) -> None:
-        result = await self.llm_runner.run(provider_model=model.name, prompt=question.text)
+    async def run_pair(
+        self, run: Run, question: Question, model: LLMModel, prompt_override: str | None = None
+    ) -> None:
+        """prompt_override lets a caller send a different prompt than the
+        bare question text — Phase 7's regression engine renders a
+        PromptVersion template around the question and passes the result
+        here, reusing this exact pipeline (response generation, cost
+        tracking, scoring, persistence) rather than duplicating it. The
+        Response row still records question_id as normal; what actually
+        changed is the text sent to the model, which is Phase 7's whole
+        point (test whether a prompt version regresses quality)."""
+        prompt = prompt_override if prompt_override is not None else question.text
+        result = await self.llm_runner.run(provider_model=model.name, prompt=prompt)
         cost_usd = compute_cost_usd(model.name, result.prompt_tokens, result.completion_tokens)
 
         response = Response(
@@ -84,6 +95,7 @@ class RunOrchestrator:
                     metric_name=score.metric_name,
                     status=score.status,
                     score=score.score,
+                    passed=score.passed,
                     reason=score.reason,
                     error_message=score.error_message,
                     judge_model=self.evaluation_service.judge_model_name,

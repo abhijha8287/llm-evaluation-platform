@@ -224,11 +224,52 @@ placeholder code" rule rules out).
   same pattern as Phase 4's auth-token fix.
 
 ## Phase 7: Regression engine
-- [ ] **T10 (P2, human: ~3h / CC: ~20min)** — regression — RegressionRun pins
+- [x] **T10 (P2, human: ~3h / CC: ~20min)** — regression — RegressionRun pins
   dataset version; mismatched versions rejected as "not comparable"
   - Surfaced by: D7
   - Files: `services/regression_service.py`
   - Verify: same-version diff test + mismatched-version rejection test
+  - Done: 5/5 tests pass, including the exact D7 claim (baseline from a
+    different dataset_version → NOT_COMPARABLE, delta_from_baseline stays
+    null, never silently diffed) and a no-prior-baseline-run case.
+  - **Schema gap found and fixed before writing any service code**: the
+    original Phase 1 `RegressionRun` had no `model_id` — a prompt-version
+    regression comparison is only meaningful with the model held constant
+    while the prompt changes; the original spec would have let a prompt
+    "regression" actually be an undetected model-choice difference. Added
+    `model_id` + `run_id` (migration `b141057e6263`, verified upgrade/
+    downgrade against real Postgres). `run_id` was the bigger architectural
+    call: rather than building a parallel response-generation path,
+    RegressionRun points at a real `Run` executed through the EXISTING
+    RunOrchestrator/Celery pipeline (D8/D12) — `RunOrchestrator.run_pair`
+    gained an optional `prompt_override` parameter (3/3 new tests) as the
+    only change needed to reuse it. `PromptService` renders `{question}`
+    templates, validated at creation time, not render time (a broken
+    template is caught immediately, not mid-run after real API calls have
+    already been made against other questions) — 4/4 tests pass.
+  - **Second correctness gap found and fixed**: reusing the real Run
+    pipeline for regression means regression responses would otherwise leak
+    into the main leaderboard's per-model averages — a prompt-engineering
+    test's scores silently corrupting "how good is this model normally"
+    stats. Added an explicit exclusion filter in `leaderboard.py`
+    (`Response.run_id.not_in(select(RegressionRun.run_id))`), caught before
+    any regression run ever executed, not after the pollution was observed.
+  - API: `api/routes/prompts.py` (template/version CRUD, auth required but
+    no rate limit — creating a template costs nothing) + `api/routes/
+    regression.py` (create + poll, reusing `enforce_run_rate_limit` directly
+    since RegressionService.create_run's underlying Run is counted by the
+    same per-project daily cap D2 already enforces). 10/10 route tests pass.
+  - Per the original design doc, the "Prompt Testing"/"Regression Results"
+    **frontend pages are explicitly Phase 8 scope** ("the backend the...
+    pages render") — not built this phase, backend-only.
+  - **Verified live**: real backend + real Celery worker + real Postgres —
+    created a real prompt template/version via the API, triggered a real
+    regression run, watched the worker process `regression_pair` tasks and
+    fire `mark_regression_completed`, confirmed `status: completed` with 5
+    responses correctly recorded as FAILED (dummy API keys, D3 isolation
+    holding) via a direct Postgres query, and confirmed the leaderboard
+    shows `response_count: 0` for the affected model.
+  - 109/109 backend tests passing after this phase.
 
 ## Phase 5 (cross-cutting): Caching
 - [x] **T11 (P2, human: ~2h / CC: ~15min)** — leaderboard — Redis cache for
@@ -245,3 +286,96 @@ placeholder code" rule rules out).
     Real bug caught along the way: `str(MetricName.TOXICITY)` renders as
     `"MetricName.TOXICITY"`, not `"toxicity"` — fixed in leaderboard.py
     during this phase's cache wiring (see T-leaderboard above).
+
+## Phase 8: Full dashboard
+- [x] **T12 (P1, human: ~1h / CC: ~10min)** — schema/scoring — `EvaluationResult.passed`
+  captured from DeepEval's own `metric.success`, not reimplemented
+  - Surfaced by: the new Pass Rate chart needs pass/fail data this schema never
+    stored — every prior phase only kept the raw score.
+  - Files: `models/evaluation_result.py`, `evaluation/scoring_service.py`,
+    `services/run_orchestrator.py`, migration `ac9ab3ff3011`
+  - Verify: direct `inspect.getsource` on the installed DeepEval's four metric
+    classes to confirm pass/fail direction per metric before writing code
+    against it (not assumed)
+  - Done: verified via source inspection that Faithfulness/AnswerRelevancy
+    pass when `score >= threshold` but Toxicity/Bias pass when
+    `score <= threshold` — captured `metric.success` directly rather than
+    reimplementing that direction logic (a real place to get it backwards).
+    Migration verified upgrade/downgrade/re-upgrade against real Postgres.
+    6/6 scoring-service tests pass (including a dedicated
+    `passed=False`-below-threshold case using a new fake with
+    `self.success = False`, not just the happy path).
+- [x] **T13 (P1, human: ~6h / CC: ~40min)** — api — Read-only list/aggregation
+  endpoints backing every new dashboard page
+  - Surfaced by: design doc Phase 8 — "remaining pages... charts" needed real
+    endpoints; none of the prior phases' single-resource GETs were list shaped.
+  - Files: `api/routes/catalog.py` (Projects/Datasets/Questions),
+    `api/routes/dashboard.py` (`GET /dashboard/trends`), plus list additions to
+    `runs.py`, `prompts.py`, `regression.py`; new `repositories/dataset_repository.py`
+  - Surfaced by D2 during design: every new list endpoint is public/no-auth,
+    consistent with the existing leaderboard/GET-run/GET-regression-run
+    pattern — there is no per-user data isolation concern on a single-demo-user
+    public deploy (D10), so gating reads behind auth here would be
+    inconsistent with every prior phase's read/write split.
+  - `GET /dashboard/trends?project_id=` returns one point per (run, model)
+    pair — latency/cost/pass-rate/metric averages — the single data source
+    every trend chart on Experiment History reads from, filtered client-side
+    per chart rather than one bespoke endpoint per chart.
+  - `GET /runs`, `GET /prompt-templates`, `GET /regression-runs` (list forms)
+    all exclude/scope consistently with existing rules already established in
+    earlier phases (regression-run-owned runs excluded from both the plain
+    runs list and the trends endpoint, same rationale as leaderboard.py's
+    existing exclusion filter).
+  - Verify: `pytest tests/test_catalog_routes.py tests/test_dashboard_routes.py
+    tests/test_runs.py tests/test_prompt_routes.py tests/test_regression_routes.py`
+  - Done: 14 new route tests, all passing (124/124 full suite, zero
+    regressions). Live-verified against real Postgres: every new endpoint
+    curled directly, correct shapes returned; full authenticated write path
+    exercised end-to-end (login → create prompt template → create version →
+    trigger regression run → list it back) against the real backend, not
+    mocked.
+- [x] **T14 (P1, human: ~10h / CC: ~1h)** — frontend — Remaining dashboard
+  pages: Projects, Datasets, Model Comparison, Experiment History, Prompt
+  Testing, Regression Results, Settings; Recharts charts
+  - Surfaced by: design doc Phase 8 explicitly lists these seven pages as the
+    "full dashboard" scope, plus TODOS.md item 3 (dataset version UI).
+  - Judgment call carried from earlier planning: "Evaluation Runs" (the
+    trigger-a-run flow, already live on the homepage since Phase 4) merged
+    into "Experiment History" as one page rather than two, since triggering
+    and reviewing runs are the same workflow — not challenged by the user, so
+    kept.
+  - Files: `frontend/app/{projects,datasets,models,history,prompts,regression,
+    settings}/page.tsx`, `frontend/components/Header.tsx` (nav), `frontend/lib/
+    {types,api}.ts` (new endpoint bindings), `recharts` added as a dependency
+  - Model Comparison: a Recharts radar chart across all four DeepEval metrics
+    at once, plus latency/cost bar charts — same `metric_averages` shape the
+    leaderboard already computes, visualized rather than a new backend
+    concept.
+  - Experiment History: runs table + four trend line charts (Latency, Cost,
+    Pass Rate, Faithfulness) pivoted client-side from `GET /dashboard/trends`
+    into one series per model.
+  - Prompt Testing: template/version CRUD (auth-gated) plus a regression-run
+    trigger form reusing `GET /me/run-context` for the model/dataset-version
+    picker — no new backend concept, just a UI over Phase 7's engine.
+  - Regression Results: per-template run history, expandable per-question
+    metric/delta table; a `not_comparable` status renders visibly (D7), never
+    silently as a diff.
+  - Datasets: TODOS.md item 3 resolved here — every dataset version listed
+    individually (number, sample size, seed date), not collapsed into a count.
+  - Settings: kept deliberately minimal — D10 means there are no real
+    per-user preferences to configure; session status, rate-limit policy
+    note, and the model roster are the genuinely useful content, not filler
+    controls with nothing behind them.
+  - Verify: `npx tsc --noEmit`, `npx eslint .`, `npm run build`
+  - Done: clean typecheck, zero lint errors/warnings, all 11 routes
+    statically prerender successfully. No browser-automation tool was
+    available in this environment (WebFetch cannot reach localhost) — UI
+    interaction was NOT visually verified in an actual browser. Verified
+    instead via: full-stack live smoke test against real Postgres/Redis/
+    Celery (see T13), the exact authenticated write path every write-capable
+    page uses (login → create template → create version → trigger regression
+    run) exercised end-to-end via curl and confirmed to return the shapes the
+    TypeScript components destructure, plus a real Celery worker run that
+    surfaced a genuine dev-environment gap (no `.env`/API keys configured,
+    `openai_api_key` defaults to `""`) — a pre-existing environment
+    limitation unrelated to this phase's code, not a regression.

@@ -9,7 +9,9 @@ from app.core.config import get_settings
 from app.evaluation.scoring_service import EvaluationService
 from app.llm.runner import LLMRunner
 from app.models.llm_model import LLMModel
+from app.models.prompt import PromptVersion
 from app.models.question import Question
+from app.models.regression import RegressionRun
 from app.models.response import Response, ResponseStatus
 from app.models.run import Run
 from app.repositories.run_repository import RunRepository
@@ -17,6 +19,8 @@ from app.services.arena_judge import ArenaJudge
 from app.services.arena_service import ArenaService
 from app.services.elo_service import EloService
 from app.services.leaderboard_cache import invalidate_leaderboard_cache
+from app.services.prompt_service import render_prompt
+from app.services.regression_service import RegressionService
 from app.services.run_orchestrator import RunOrchestrator
 from app.workers.celery_app import celery_app
 
@@ -67,6 +71,22 @@ def arena_judge_pair_task(project_id: int, question_id: int, response_1_id: int,
     asyncio.run(_arena_judge_pair_async(project_id, question_id, response_1_id, response_2_id))
 
 
+@celery_app.task(name="eval_tasks.regression_pair")
+def regression_pair_task(regression_run_id: int, question_id: int) -> None:
+    """Phase 7: one task per question — unlike run_pair_task, there is no
+    (question, model) cross product here, since a single RegressionRun tests
+    exactly one model with exactly one prompt version."""
+    asyncio.run(_regression_pair_async(regression_run_id, question_id))
+
+
+@celery_app.task(name="eval_tasks.mark_regression_completed")
+def mark_regression_completed_task(_group_results: list, regression_run_id: int) -> None:
+    """Celery chord callback — marks the underlying Run complete, then runs
+    RegressionService.compute_results (D7's baseline-diff step, including
+    the NOT_COMPARABLE gate)."""
+    asyncio.run(_mark_regression_completed_async(regression_run_id))
+
+
 def dispatch_run(run_id: int, question_ids: list[int], model_ids: list[int]) -> None:
     """eng-review D12: one task per (question, model) pair, grouped under a
     chord whose callback marks the Run complete only once every pair has
@@ -83,6 +103,13 @@ def dispatch_run(run_id: int, question_ids: list[int], model_ids: list[int]) -> 
         for model_id in model_ids
     ]
     chord(pair_signatures)(mark_run_completed_task.s(run_id))
+
+
+def dispatch_regression_run(regression_run_id: int, question_ids: list[int]) -> None:
+    """See dispatch_run's docstring — same chord pattern, one task per
+    question rather than one per (question, model) pair."""
+    pair_signatures = [regression_pair_task.s(regression_run_id, question_id) for question_id in question_ids]
+    chord(pair_signatures)(mark_regression_completed_task.s(regression_run_id))
 
 
 async def _run_pair_async(run_id: int, question_id: int, model_id: int) -> None:
@@ -163,3 +190,51 @@ async def _arena_judge_pair_async(project_id: int, question_id: int, response_1_
     # D13: Elo changed, not just a Response — the leaderboard's elo_rating_*
     # columns are part of the cached payload too.
     await invalidate_leaderboard_cache()
+
+
+async def _regression_pair_async(regression_run_id: int, question_id: int) -> None:
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            regression_run = await session.get(RegressionRun, regression_run_id)
+            run = await session.get(Run, regression_run.run_id)
+            question = await session.get(Question, question_id)
+            model = await session.get(LLMModel, regression_run.model_id)
+            prompt_version = await session.get(PromptVersion, regression_run.prompt_version_id)
+            rendered_prompt = render_prompt(prompt_version, question)
+
+            llm_runner = LLMRunner()
+            evaluation_service = EvaluationService(
+                judge_model=settings.judge_model, judge_api_key=settings.openai_api_key
+            )
+            orchestrator = RunOrchestrator(session, llm_runner, evaluation_service)
+            await orchestrator.run_pair(run, question, model, prompt_override=rendered_prompt)
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+    # Phase 7's leaderboard-exclusion filter means regression responses
+    # never change what the leaderboard shows, but invalidate anyway — the
+    # filter itself depends on regression_runs existing, and a stale cached
+    # entry from before this regression_run existed could theoretically
+    # predate the exclusion being correct for it. Cheap and correct beats
+    # explaining why it's skippable.
+    await invalidate_leaderboard_cache()
+
+
+async def _mark_regression_completed_async(regression_run_id: int) -> None:
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            regression_run = await session.get(RegressionRun, regression_run_id)
+            run = await session.get(Run, regression_run.run_id)
+            await RunRepository(session).mark_completed(run)
+
+            await RegressionService(session).compute_results(regression_run)
+            await session.commit()
+    finally:
+        await engine.dispose()

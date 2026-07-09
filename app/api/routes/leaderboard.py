@@ -7,6 +7,7 @@ from app.core.database import get_session
 from app.models.comparison import Comparison, VoterType
 from app.models.evaluation_result import EvaluationResult, EvaluationStatus
 from app.models.llm_model import LLMModel
+from app.models.regression import RegressionRun
 from app.models.response import Response, ResponseStatus
 from app.services.leaderboard_cache import get_cached_leaderboard, set_cached_leaderboard
 
@@ -42,6 +43,13 @@ async def _count_comparisons(session: AsyncSession, model_id: int, voter_type: V
 async def _compute_leaderboard(session: AsyncSession) -> list[LeaderboardEntry]:
     models = list((await session.execute(select(LLMModel))).scalars().all())
 
+    # Phase 7: regression runs reuse the real Run/Response/EvaluationResult
+    # pipeline (D8) wholesale — including intentionally-varied prompts that
+    # would otherwise pollute "how good is this model, normally" stats with
+    # prompt-engineering-test noise. Exclude any Response whose run_id is a
+    # regression run's underlying run.
+    regression_run_ids = select(RegressionRun.run_id)
+
     entries: list[LeaderboardEntry] = []
     for model in models:
         # eng-review D3: only SUCCESS responses count toward averages — a
@@ -50,7 +58,11 @@ async def _compute_leaderboard(session: AsyncSession) -> list[LeaderboardEntry]:
             func.count(Response.id),
             func.avg(Response.latency_ms),
             func.avg(Response.cost_usd),
-        ).where(Response.model_id == model.id, Response.status == ResponseStatus.SUCCESS)
+        ).where(
+            Response.model_id == model.id,
+            Response.status == ResponseStatus.SUCCESS,
+            Response.run_id.not_in(regression_run_ids),
+        )
         count, avg_latency, avg_cost = (await session.execute(agg_stmt)).one()
 
         # eng-review D9: only SUCCESS-status EvaluationResults count — a
@@ -58,7 +70,11 @@ async def _compute_leaderboard(session: AsyncSession) -> list[LeaderboardEntry]:
         metric_stmt = (
             select(EvaluationResult.metric_name, func.avg(EvaluationResult.score))
             .join(Response, Response.id == EvaluationResult.response_id)
-            .where(Response.model_id == model.id, EvaluationResult.status == EvaluationStatus.SUCCESS)
+            .where(
+                Response.model_id == model.id,
+                EvaluationResult.status == EvaluationStatus.SUCCESS,
+                Response.run_id.not_in(regression_run_ids),
+            )
             .group_by(EvaluationResult.metric_name)
         )
         metric_rows = (await session.execute(metric_stmt)).all()

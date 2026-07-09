@@ -19,10 +19,19 @@ class RegressionStatus(str, enum.Enum):
 
 
 class RegressionRun(Base):
-    """eng-review D7: pins a Dataset version at creation time. Comparisons only
-    happen between RegressionRuns that share the same dataset_version_id — see
-    services/regression_service.py. Reuses the shared EvaluationService from
-    eng-review D8 rather than duplicating scoring logic."""
+    """eng-review D7: pins a Dataset version at creation time. Comparisons
+    only happen between RegressionRuns that share the same dataset_version_id
+    — see services/regression_service.py.
+
+    Phase 7 build-out: model_id and run_id were added on top of the original
+    Phase 1 schema — a prompt-version regression comparison is only
+    meaningful if the MODEL is held constant while the prompt changes (the
+    original spec omitted this, which would have let a prompt "regression"
+    actually be a model-choice difference in disguise). run_id points at a
+    real Run created and executed through the existing pipeline
+    (RunOrchestrator.run_pair, EvaluationService) — a RegressionRun doesn't
+    duplicate response generation or scoring, it reuses D8's shared
+    infrastructure wholesale and adds a diff-against-baseline step on top."""
 
     __tablename__ = "regression_runs"
 
@@ -36,6 +45,8 @@ class RegressionRun(Base):
     dataset_version_id: Mapped[int] = mapped_column(
         ForeignKey("dataset_versions.id", ondelete="RESTRICT"), index=True
     )
+    model_id: Mapped[int] = mapped_column(ForeignKey("llm_models.id", ondelete="RESTRICT"), index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True, unique=True)
     # SAEnum, not String — see question.py's comment; a plain String column
     # silently loses the Python enum type on every fresh load from the DB.
     status: Mapped[RegressionStatus] = mapped_column(
@@ -49,6 +60,8 @@ class RegressionRun(Base):
         foreign_keys=[baseline_prompt_version_id]
     )
     dataset_version: Mapped["DatasetVersion"] = relationship()
+    model: Mapped["LLMModel"] = relationship()
+    run: Mapped["Run"] = relationship()
     results: Mapped[list["RegressionResult"]] = relationship(
         back_populates="regression_run", cascade="all, delete-orphan"
     )

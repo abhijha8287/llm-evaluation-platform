@@ -19,6 +19,7 @@ from app.models.dataset import Dataset, DatasetVersion, DatasetVersionQuestion
 from app.models.llm_model import LLMModel
 from app.models.project import Project
 from app.models.question import Question, QuestionType
+from app.models.response import Response, ResponseStatus
 from app.models.run import Run, RunStatus
 from app.models.user import User
 
@@ -243,3 +244,73 @@ async def test_get_run_requires_no_auth(test_client, session_factory, seeded_dem
 async def test_get_run_404_for_unknown_id(test_client):
     response = await test_client.get("/runs/999999")
     assert response.status_code == 404
+
+
+async def test_list_runs_requires_no_auth_and_reports_response_count(
+    test_client, session_factory, seeded_demo_user
+):
+    """Phase 8: backs the Experiment History dashboard page."""
+    project_id, dataset_version_id, model_id = await _seed_project_dataset_and_model(
+        session_factory, seeded_demo_user.id
+    )
+    async with session_factory() as session:
+        run = Run(
+            project_id=project_id, dataset_version_id=dataset_version_id, status=RunStatus.COMPLETED
+        )
+        session.add(run)
+        await session.flush()
+        session.add(Response(run_id=run.id, question_id=1, model_id=model_id, status=ResponseStatus.SUCCESS))
+        session.add(Response(run_id=run.id, question_id=1, model_id=model_id, status=ResponseStatus.SUCCESS))
+        await session.commit()
+        run_id = run.id
+
+    response = await test_client.get("/runs", params={"project_id": project_id})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["id"] == run_id
+    assert body[0]["response_count"] == 2
+
+
+async def test_list_runs_excludes_regression_run(test_client, session_factory, seeded_demo_user):
+    """Regression-run-owned runs show up under Regression Results instead —
+    same exclusion rationale as the leaderboard (see leaderboard.py)."""
+    project_id, dataset_version_id, model_id = await _seed_project_dataset_and_model(
+        session_factory, seeded_demo_user.id
+    )
+    async with session_factory() as session:
+        from app.models.prompt import PromptTemplate, PromptVersion
+        from app.models.regression import RegressionRun, RegressionStatus
+
+        plain_run = Run(project_id=project_id, dataset_version_id=dataset_version_id, status=RunStatus.COMPLETED)
+        session.add(plain_run)
+        await session.flush()
+
+        template = PromptTemplate(project_id=project_id, name="T")
+        session.add(template)
+        await session.flush()
+        version = PromptVersion(prompt_template_id=template.id, version_number=1, content="{question}")
+        session.add(version)
+        await session.flush()
+
+        regression_underlying_run = Run(
+            project_id=project_id, dataset_version_id=dataset_version_id, status=RunStatus.COMPLETED
+        )
+        session.add(regression_underlying_run)
+        await session.flush()
+        session.add(
+            RegressionRun(
+                prompt_version_id=version.id,
+                dataset_version_id=dataset_version_id,
+                model_id=model_id,
+                run_id=regression_underlying_run.id,
+                status=RegressionStatus.COMPLETED,
+            )
+        )
+        await session.commit()
+        plain_run_id = plain_run.id
+
+    response = await test_client.get("/runs", params={"project_id": project_id})
+    assert response.status_code == 200
+    body = response.json()
+    assert [r["id"] for r in body] == [plain_run_id]

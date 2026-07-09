@@ -29,6 +29,7 @@ class MetricScore:
     metric_name: MetricName
     status: EvaluationStatus
     score: float | None = None
+    passed: bool | None = None
     reason: str | None = None
     error_message: str | None = None
 
@@ -93,6 +94,13 @@ class EvaluationService:
                     metric_name=metric_name,
                     status=EvaluationStatus.SUCCESS,
                     score=metric.score,
+                    # Captured directly from DeepEval, not reimplemented —
+                    # verified (Phase 8) that pass/fail direction differs by
+                    # metric: Faithfulness/AnswerRelevancy pass when score >=
+                    # threshold (higher is better), Toxicity/Bias pass when
+                    # score <= threshold (lower is better). Recomputing this
+                    # ourselves would risk getting a direction wrong.
+                    passed=metric.success,
                     reason=metric.reason,
                 )
             )

@@ -109,6 +109,32 @@ async def test_execute_persists_responses_and_evaluation_results_for_every_pair(
     assert refreshed_run.completed_at is not None
 
 
+async def test_run_pair_uses_prompt_override_when_given(db_session):
+    """Phase 7: regression testing sends a rendered prompt-template around
+    the question text, not the bare question — this is the seam that lets
+    it reuse run_pair instead of duplicating response generation."""
+    run, models, questions = await _seed_run_fixture(db_session)
+    model = models[0]
+    question = questions[0]
+
+    runner = LLMRunner()
+    runner.run = AsyncMock(
+        return_value=RunResult(status=ResponseStatus.SUCCESS, output="answer", latency_ms=100, prompt_tokens=10, completion_tokens=5)
+    )
+    evaluator = _fake_evaluator([])
+
+    orchestrator = RunOrchestrator(db_session, runner, evaluator)
+    await orchestrator.run_pair(run, question, model, prompt_override="SYSTEM PROMPT + Q1")
+    await db_session.commit()
+
+    runner.run.assert_awaited_once_with(provider_model=model.name, prompt="SYSTEM PROMPT + Q1")
+
+    response = (await db_session.execute(select(Response).where(Response.run_id == run.id))).scalars().one()
+    # The Response still records the real question_id — only the text sent
+    # to the model changed, not which question this is scored against.
+    assert response.question_id == question.id
+
+
 async def test_execute_isolates_one_model_failure_from_the_rest(db_session):
     """eng-review D3 at the orchestration level: model A failing for a
     question must not stop model B's response for the same question, or any

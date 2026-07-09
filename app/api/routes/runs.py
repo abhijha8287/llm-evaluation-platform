@@ -2,7 +2,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
@@ -10,6 +10,8 @@ from app.core.deps import enforce_run_rate_limit, get_current_user
 from app.models.dataset import Dataset, DatasetVersion
 from app.models.llm_model import LLMModel
 from app.models.project import Project
+from app.models.regression import RegressionRun
+from app.models.response import Response
 from app.models.run import Run, RunStatus
 from app.models.user import User
 from app.repositories.question_repository import QuestionRepository
@@ -38,6 +40,16 @@ class RunResponse(BaseModel):
     completed_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+class RunListItem(BaseModel):
+    id: int
+    project_id: int
+    dataset_version_id: int
+    status: RunStatus
+    created_at: datetime
+    completed_at: datetime | None
+    response_count: int
 
 
 @router.post("", response_model=RunResponse, status_code=status.HTTP_201_CREATED)
@@ -90,6 +102,43 @@ async def create_run(
     dispatch_run(run.id, [q.id for q in questions], [m.id for m in models])
 
     return run
+
+
+@router.get("", response_model=list[RunListItem])
+async def list_runs(project_id: int, session: AsyncSession = Depends(get_session)) -> list[RunListItem]:
+    """Public, no-auth (D2). Backs the Experiment History dashboard page.
+    Excludes regression-run-owned runs — those show up under Regression
+    Results instead (see leaderboard.py's identical exclusion filter and
+    its rationale)."""
+    regression_run_ids = select(RegressionRun.run_id)
+    stmt = (
+        select(
+            Run.id,
+            Run.project_id,
+            Run.dataset_version_id,
+            Run.status,
+            Run.created_at,
+            Run.completed_at,
+            func.count(Response.id).label("response_count"),
+        )
+        .outerjoin(Response, Response.run_id == Run.id)
+        .where(Run.project_id == project_id, Run.id.not_in(regression_run_ids))
+        .group_by(Run.id)
+        .order_by(Run.created_at.desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        RunListItem(
+            id=r.id,
+            project_id=r.project_id,
+            dataset_version_id=r.dataset_version_id,
+            status=r.status,
+            created_at=r.created_at,
+            completed_at=r.completed_at,
+            response_count=r.response_count,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/{run_id}", response_model=RunResponse)

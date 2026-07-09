@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import arena, auth, context, leaderboard, runs
+from app.api.routes import arena, auth, catalog, context, dashboard, leaderboard, prompts, regression, runs
 from app.core.database import get_session_factory
 
 
@@ -39,6 +39,11 @@ app.include_router(runs.router)
 app.include_router(leaderboard.router)
 app.include_router(context.router)
 app.include_router(arena.router)
+app.include_router(prompts.router)
+app.include_router(regression.router)
+app.include_router(catalog.projects_router)
+app.include_router(catalog.datasets_router)
+app.include_router(dashboard.router)
 
 
 @app.get("/health")

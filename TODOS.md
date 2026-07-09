@@ -22,12 +22,9 @@ the cache could go stale indefinitely with no self-correction.
 Phase 5 eval pipeline.
 **Depends on:** D13's write-invalidation cache landing first (Phase 5).
 
-## 3. Dataset version management UI
-**What:** D5 (seeded sampling) and D7 (regression snapshot pinning) introduced
-dataset versioning as a backend concept. No UI exists to view, compare, or manage
-dataset versions — currently only queryable directly in Postgres.
-**Why:** makes the versioning system (a real eval-methodology strength) visible and
-demoable, not just correct under the hood.
-**Trigger:** natural fit for Phase 8 (Full dashboard) — fold into the existing
-Datasets page work when that phase starts.
-**Depends on:** D5/D7's versioning schema (Phase 1/7).
+## 3. Dataset version management UI — DONE (Phase 8)
+Resolved: the Datasets page (`frontend/app/datasets/page.tsx`) lists every version of
+each dataset individually (version number, sample size, seeded date), not just a
+collapsed count. Comparing versions' *scores* (not just metadata) is naturally covered
+by Experiment History / Regression Results instead, since D5/D7 already scope
+Runs/RegressionRuns to one dataset_version_id each.

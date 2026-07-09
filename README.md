@@ -52,7 +52,51 @@ writing to the same Elo tracks by voter type. Row-level locked Elo updates
 (D4) verified against a **real concurrent-write race on the actual Postgres
 container** — confirmed the test fails reliably with the lock removed and
 passes reliably with it restored. Frontend `/arena` page for blind voting.
-85/85 backend tests passing.
+
+Phase 7 (prompt regression engine) complete: `PromptTemplate`/`PromptVersion`
+CRUD with `{question}`-placeholder validation at creation time; regression
+runs reuse the real `Run`/`RunOrchestrator`/Celery pipeline wholesale (a new
+optional `prompt_override` param on `run_pair` was the only change needed) —
+no parallel response-generation path. Diffs against a baseline prompt
+version only when it shares the same `dataset_version_id` (D7); otherwise
+marked `not_comparable`, deltas stay null, never silently diffed. Two real
+gaps found and fixed before they could ship: the original schema had no
+`model_id` on `RegressionRun` (a "regression" could otherwise have actually
+been an undetected model swap), and regression responses would have leaked
+into the main leaderboard's per-model averages without an explicit
+exclusion filter. `api/routes/prompts.py` + `api/routes/regression.py`
+(reuses the same rate-limit gate as `POST /runs`). Per the original design
+doc, the "Prompt Testing"/"Regression Results" frontend pages are Phase 8
+scope — this phase is backend-only. **Live-verified** with a real Celery
+worker + real Postgres: created a real prompt template/version, triggered a
+real regression run, watched it complete, confirmed failure isolation and
+leaderboard exclusion via direct Postgres queries. 109/109 backend tests
+passing.
+
+Phase 8 (full dashboard) complete: `EvaluationResult.passed` added — captured
+directly from DeepEval's own `metric.success` (verified per-metric pass/fail
+direction against the installed library, not assumed) rather than
+reimplemented, so a real Pass Rate chart is now possible. New read-only
+list/aggregation endpoints (`api/routes/catalog.py`, `api/routes/
+dashboard.py`, plus list additions to `runs.py`/`prompts.py`/
+`regression.py`) — all public/no-auth (D2), consistent with every prior
+read-only endpoint. `GET /dashboard/trends` is the single data source behind
+every Experiment History chart: one point per (run, model) pair with
+latency/cost/pass-rate/metric averages, pivoted client-side per chart. Seven
+new Next.js pages — Projects, Datasets (TODOS.md item 3 resolved: every
+dataset version listed individually, not collapsed into a count), Model
+Comparison (Recharts radar across all four metrics + latency/cost bars),
+Experiment History (runs table + four trend line charts), Prompt Testing
+(template/version CRUD + regression-run trigger), Regression Results
+(per-question metric/delta table, `not_comparable` rendered visibly per D7),
+Settings. 124/124 backend tests passing (14 new). Frontend: clean
+`tsc`/`eslint`/`next build`. **Live-verified**: every new endpoint curled
+against real Postgres; the full authenticated write path (login → create
+prompt template → create version → trigger regression run → list it back)
+exercised end-to-end against the real backend. No browser-automation tool
+was available in this environment to visually click through the new pages —
+noted explicitly rather than assumed working; the data-fetching logic is the
+same `useEffect`+`fetch` pattern already proven live in Phases 4/5/6.
 
 ## Running locally
 
@@ -95,4 +139,5 @@ repository pattern) + PostgreSQL + Alembic + Celery/Redis (one task per
 question×model pair grouped under a chord, D12) + LiteLLM (multi-provider
 abstraction + pricing, D6) + DeepEval (metrics, D8's shared
 EvaluationService) + blind LLM-judged/human Elo arena (row-level locked,
-D4) + Next.js frontend.
+D4) + prompt-version regression testing (D7, reuses the same Run pipeline)
++ Next.js frontend.

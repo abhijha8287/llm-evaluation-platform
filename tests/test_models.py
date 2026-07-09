@@ -128,6 +128,8 @@ async def test_seed_one_row_per_table(db_session):
     regression_run = RegressionRun(
         prompt_version_id=prompt_version.id,
         dataset_version_id=dataset_version.id,
+        model_id=model_a.id,
+        run_id=run.id,
         status=RegressionStatus.COMPLETED,
     )
     db_session.add(regression_run)

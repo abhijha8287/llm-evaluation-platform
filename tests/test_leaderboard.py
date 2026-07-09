@@ -3,6 +3,7 @@ count toward averages (eng-review D3/D9) — a failed or timed-out call must
 never read as a real 0."""
 
 import pytest
+from sqlalchemy import select
 
 from app.models.comparison import Comparison, VoterType
 from app.models.dataset import Dataset, DatasetVersion
@@ -170,6 +171,71 @@ async def test_leaderboard_defaults_elo_to_1500_with_no_comparisons(test_client,
     assert entry["elo_rating_human"] == DEFAULT_ELO_RATING
     assert entry["llm_judge_comparison_count"] == 0
     assert entry["human_comparison_count"] == 0
+
+
+async def test_leaderboard_excludes_regression_run_responses(test_client, session_factory):
+    """Phase 7: a regression run's responses (deliberately varied prompts,
+    testing a prompt version, not the model's normal behavior) must never
+    be mixed into "how good is this model normally" stats."""
+    from app.models.prompt import PromptTemplate, PromptVersion
+    from app.models.regression import RegressionRun, RegressionStatus
+
+    async with session_factory() as session:
+        model_id = await _seed_leaderboard_fixture(session)
+        # _seed_leaderboard_fixture already created one normal SUCCESS
+        # response (latency_ms=100, cost=0.001). Add a second, regression-run
+        # response with very different numbers that must NOT show up.
+        project = (await session.execute(select(Run))).scalars().first()
+        dataset_version = (await session.execute(select(DatasetVersion))).scalars().first()
+        question = (await session.execute(select(Question))).scalars().first()
+
+        regression_run_underlying = Run(
+            project_id=project.project_id, dataset_version_id=dataset_version.id
+        )
+        session.add(regression_run_underlying)
+        await session.flush()
+
+        regression_response = Response(
+            run_id=regression_run_underlying.id, question_id=question.id, model_id=model_id,
+            status=ResponseStatus.SUCCESS, output="regression-tested answer",
+            latency_ms=99999, cost_usd=99.0,
+        )
+        session.add(regression_response)
+        await session.flush()
+        session.add(
+            EvaluationResult(
+                response_id=regression_response.id, metric_name=MetricName.TOXICITY,
+                status=EvaluationStatus.SUCCESS, score=0.01, judge_model="gpt-4o-mini",
+            )
+        )
+
+        template = PromptTemplate(project_id=project.project_id, name="T")
+        session.add(template)
+        await session.flush()
+        prompt_version = PromptVersion(prompt_template_id=template.id, version_number=1, content="{question}")
+        session.add(prompt_version)
+        await session.flush()
+        session.add(
+            RegressionRun(
+                prompt_version_id=prompt_version.id,
+                dataset_version_id=dataset_version.id,
+                model_id=model_id,
+                run_id=regression_run_underlying.id,
+                status=RegressionStatus.COMPLETED,
+            )
+        )
+        await session.commit()
+
+    response = await test_client.get("/leaderboard")
+    entries = {e["model_id"]: e for e in response.json()}
+    entry = entries[model_id]
+
+    # Only the ORIGINAL fixture response counts — the regression response's
+    # 99999ms/$99/0.01-score must not drag the averages toward it.
+    assert entry["response_count"] == 1
+    assert entry["avg_latency_ms"] == 100
+    assert entry["avg_cost_usd"] == 0.001
+    assert entry["metric_averages"]["toxicity"] == 0.9
 
 
 async def test_leaderboard_serves_from_cache_on_second_read(test_client, session_factory):

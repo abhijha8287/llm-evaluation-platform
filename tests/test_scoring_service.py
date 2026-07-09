@@ -25,8 +25,16 @@ def _question(question_type: QuestionType, retrieval_context: str | None = None)
 
 async def _fake_measure_ok(self, test_case, **kwargs):
     self.score = 0.9
+    self.success = True
     self.reason = "looks fine"
     return 0.9
+
+
+async def _fake_measure_below_threshold(self, test_case, **kwargs):
+    self.score = 0.1
+    self.success = False
+    self.reason = "below threshold"
+    return 0.1
 
 
 async def _fake_measure_fails(self, test_case, **kwargs):
@@ -65,6 +73,25 @@ async def test_score_response_open_domain_never_attempts_faithfulness():
     assert MetricName.FAITHFULNESS not in metric_names
     assert all(r.status == EvaluationStatus.SUCCESS for r in results)
     assert all(r.score == 0.9 for r in results)
+    assert all(r.passed is True for r in results)
+
+
+async def test_score_response_captures_passed_false_below_threshold():
+    """Phase 8: passed is captured directly from DeepEval's metric.success,
+    not derived from score alone — this confirms the wiring surfaces False
+    correctly, not just the "everything passes" happy path."""
+    question = _question(QuestionType.OPEN_DOMAIN)
+
+    with patch.object(ToxicityMetric, "a_measure", _fake_measure_below_threshold), patch.object(
+        BiasMetric, "a_measure", _fake_measure_ok
+    ), patch.object(AnswerRelevancyMetric, "a_measure", _fake_measure_ok):
+        service = EvaluationService(judge_model="gpt-4o-mini", judge_api_key="fake-key")
+        results = await service.score_response(question, actual_output="An answer")
+
+    by_name = {r.metric_name: r for r in results}
+    assert by_name[MetricName.TOXICITY].passed is False
+    assert by_name[MetricName.TOXICITY].score == 0.1
+    assert by_name[MetricName.BIAS].passed is True
 
 
 async def test_score_response_rag_includes_faithfulness():
