@@ -6,19 +6,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.deps import enforce_run_rate_limit, get_current_user, get_evaluation_service, get_llm_runner
-from app.evaluation.scoring_service import EvaluationService
-from app.llm.runner import LLMRunner
+from app.core.deps import enforce_run_rate_limit, get_current_user
 from app.models.dataset import Dataset, DatasetVersion
 from app.models.llm_model import LLMModel
 from app.models.project import Project
 from app.models.run import Run, RunStatus
 from app.models.user import User
+from app.repositories.question_repository import QuestionRepository
 from app.repositories.run_repository import RunRepository
-from app.services.run_orchestrator import RunOrchestrator
+from app.workers.eval_tasks import dispatch_run
 
-# eng-review D2: read-only endpoints (leaderboard.py) require no auth. This
-# endpoint is the one exception: creating a Run costs real provider API
+# eng-review D2: read-only endpoints (leaderboard.py, GET /runs/{id}) require
+# no auth. Creating a Run is the one exception: it costs real provider API
 # money, so it requires both a valid JWT (get_current_user) AND the rate
 # limit (enforce_run_rate_limit) — the rate limit does not trust auth alone
 # to be sufficient.
@@ -46,8 +45,6 @@ async def create_run(
     body: CreateRunRequest,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
-    llm_runner: LLMRunner = Depends(get_llm_runner),
-    evaluation_service: EvaluationService = Depends(get_evaluation_service),
 ) -> Run:
     if not body.model_ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="model_ids must not be empty")
@@ -76,17 +73,31 @@ async def create_run(
 
     await enforce_run_rate_limit(project_id=body.project_id, session=session)
 
+    questions = await QuestionRepository(session).list_for_dataset_version(body.dataset_version_id)
+    if not questions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Dataset version has no sampled questions"
+        )
+
     run = await RunRepository(session).add(
         Run(project_id=body.project_id, dataset_version_id=body.dataset_version_id, status=RunStatus.RUNNING)
     )
-    await session.flush()
-
-    # Phase 4: synchronous execution — one HTTP request runs the whole batch
-    # and returns once complete. eng-review D12 moves this into one Celery
-    # task per (question, model) pair in Phase 5; RunOrchestrator is already
-    # structured that way internally so that move doesn't require a rewrite.
-    orchestrator = RunOrchestrator(session, llm_runner, evaluation_service)
-    await orchestrator.execute(run, models)
-
+    # Commit before dispatch, not after — Celery workers run in a separate
+    # process (eng-review D1) and must see this Run row (and every question
+    # id referenced below) before a task tries to load it.
     await session.commit()
+
+    dispatch_run(run.id, [q.id for q in questions], [m.id for m in models])
+
+    return run
+
+
+@router.get("/{run_id}", response_model=RunResponse)
+async def get_run(run_id: int, session: AsyncSession = Depends(get_session)) -> Run:
+    """Public, no-auth (D2) — the frontend polls this after POST /runs
+    dispatches the async Celery chord, since the run is no longer completed
+    synchronously within the POST request/response cycle (Phase 5)."""
+    run = await session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     return run

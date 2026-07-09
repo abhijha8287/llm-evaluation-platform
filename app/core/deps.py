@@ -5,8 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.security import decode_access_token
-from app.evaluation.scoring_service import EvaluationService
-from app.llm.runner import LLMRunner
 from app.models.user import User
 from app.repositories.run_repository import RunRepository
 from app.repositories.user_repository import UserRepository
@@ -55,14 +53,3 @@ async def enforce_run_rate_limit(project_id: int, session: AsyncSession) -> None
                 "per project. Try again later."
             ),
         )
-
-
-def get_llm_runner() -> LLMRunner:
-    """FastAPI dependency so tests can override this with a mocked runner
-    instead of making real provider API calls — see tests/conftest.py."""
-    return LLMRunner()
-
-
-def get_evaluation_service() -> EvaluationService:
-    settings = get_settings()
-    return EvaluationService(judge_model=settings.judge_model, judge_api_key=settings.openai_api_key)

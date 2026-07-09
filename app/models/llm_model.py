@@ -21,9 +21,16 @@ class LLMModel(Base):
     provider: Mapped[str] = mapped_column(String(50))
     name: Mapped[str] = mapped_column(String(100))
     display_name: Mapped[str] = mapped_column(String(150))
-    # eng-review D4: updated under a row-level lock (SELECT ... FOR UPDATE) in
-    # services/elo_service.py — never updated via a bare read-then-write.
-    elo_rating: Mapped[float] = mapped_column(Float, default=DEFAULT_ELO_RATING)
+    # office-hours design doc Phase 6: LLM-judged vs human-judged Elo are
+    # tracked as two independent running ratings, not one blended number —
+    # the leaderboard shows them separately since the LLM judge casts the
+    # bulk of votes (fast volume) while human votes are comparatively rare
+    # but higher-signal; blending them would let judge-model bias quietly
+    # dominate a number presented as if humans agreed with it.
+    # eng-review D4: both updated under a row-level lock (SELECT ... FOR
+    # UPDATE) in services/elo_service.py — never a bare read-then-write.
+    elo_rating_llm_judge: Mapped[float] = mapped_column(Float, default=DEFAULT_ELO_RATING)
+    elo_rating_human: Mapped[float] = mapped_column(Float, default=DEFAULT_ELO_RATING)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     responses: Mapped[list["Response"]] = relationship(back_populates="model")

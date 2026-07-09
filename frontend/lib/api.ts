@@ -1,4 +1,12 @@
-import type { LeaderboardEntry, RunContext, RunResponse, TokenResponse } from "./types";
+import type {
+  ArenaComparisonOption,
+  LeaderboardEntry,
+  RunContext,
+  RunResponse,
+  TokenResponse,
+  VoteRequest,
+  VoteResponse,
+} from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -63,6 +71,9 @@ export async function createRun(
   token: string,
   body: { project_id: number; dataset_version_id: number; model_ids: number[] },
 ): Promise<RunResponse> {
+  // Phase 5: this returns immediately with status "running" — the Celery
+  // chord dispatched by the backend hasn't finished yet. Callers must poll
+  // getRun() (see TriggerRunPanel) rather than treat this response as final.
   const response = await fetch(`${API_URL}/runs`, {
     method: "POST",
     headers: {
@@ -72,6 +83,34 @@ export async function createRun(
     body: JSON.stringify(body),
   });
 
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getRun(runId: number): Promise<RunResponse> {
+  const response = await fetch(`${API_URL}/runs/${runId}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function getNextComparison(): Promise<ArenaComparisonOption> {
+  const response = await fetch(`${API_URL}/arena/next-comparison`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response), response.status);
+  }
+  return response.json();
+}
+
+export async function submitVote(body: VoteRequest): Promise<VoteResponse> {
+  const response = await fetch(`${API_URL}/arena/vote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!response.ok) {
     throw new ApiError(await parseErrorDetail(response), response.status);
   }

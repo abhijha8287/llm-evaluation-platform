@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.models.comparison import Comparison, VoterType
 from app.models.evaluation_result import EvaluationResult, EvaluationStatus
 from app.models.llm_model import LLMModel
 from app.models.response import Response, ResponseStatus
+from app.services.leaderboard_cache import get_cached_leaderboard, set_cached_leaderboard
 
 # eng-review D2: read-only, no auth required — this is what a recruiter sees
 # when they open the demo URL with no login.
@@ -17,15 +19,27 @@ class LeaderboardEntry(BaseModel):
     model_id: int
     display_name: str
     provider: str
-    elo_rating: float
+    # office-hours design doc Phase 6: LLM-judged and human-judged Elo are
+    # shown separately, not blended — see app/models/llm_model.py.
+    elo_rating_llm_judge: float
+    elo_rating_human: float
+    llm_judge_comparison_count: int
+    human_comparison_count: int
     response_count: int
     avg_latency_ms: float | None
     avg_cost_usd: float | None
     metric_averages: dict[str, float]
 
 
-@router.get("", response_model=list[LeaderboardEntry])
-async def get_leaderboard(session: AsyncSession = Depends(get_session)) -> list[LeaderboardEntry]:
+async def _count_comparisons(session: AsyncSession, model_id: int, voter_type: VoterType) -> int:
+    stmt = select(func.count(Comparison.id)).where(
+        or_(Comparison.model_a_id == model_id, Comparison.model_b_id == model_id),
+        Comparison.voter_type == voter_type,
+    )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def _compute_leaderboard(session: AsyncSession) -> list[LeaderboardEntry]:
     models = list((await session.execute(select(LLMModel))).scalars().all())
 
     entries: list[LeaderboardEntry] = []
@@ -49,12 +63,18 @@ async def get_leaderboard(session: AsyncSession = Depends(get_session)) -> list[
         )
         metric_rows = (await session.execute(metric_stmt)).all()
 
+        llm_judge_count = await _count_comparisons(session, model.id, VoterType.LLM_JUDGE)
+        human_count = await _count_comparisons(session, model.id, VoterType.HUMAN)
+
         entries.append(
             LeaderboardEntry(
                 model_id=model.id,
                 display_name=model.display_name,
                 provider=model.provider,
-                elo_rating=model.elo_rating,
+                elo_rating_llm_judge=model.elo_rating_llm_judge,
+                elo_rating_human=model.elo_rating_human,
+                llm_judge_comparison_count=llm_judge_count,
+                human_comparison_count=human_count,
                 response_count=count,
                 avg_latency_ms=float(avg_latency) if avg_latency is not None else None,
                 avg_cost_usd=float(avg_cost) if avg_cost is not None else None,
@@ -66,4 +86,15 @@ async def get_leaderboard(session: AsyncSession = Depends(get_session)) -> list[
             )
         )
 
+    return entries
+
+
+@router.get("", response_model=list[LeaderboardEntry])
+async def get_leaderboard(session: AsyncSession = Depends(get_session)) -> list[LeaderboardEntry]:
+    cached = await get_cached_leaderboard()
+    if cached is not None:
+        return [LeaderboardEntry(**entry) for entry in cached]
+
+    entries = await _compute_leaderboard(session)
+    await set_cached_leaderboard([entry.model_dump() for entry in entries])
     return entries

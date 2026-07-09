@@ -15,6 +15,14 @@ function formatCost(usd: number | null): string {
   return `$${usd.toFixed(4)}`;
 }
 
+// office-hours design doc Phase 6: Elo is shown as two independent numbers,
+// LLM-judged and human-judged, with their vote counts alongside — a bare
+// number with no sample size is misleading (one win can swing Elo by
+// K_FACTOR=32 points).
+function formatElo(rating: number, count: number): string {
+  return `${Math.round(rating)} (${count})`;
+}
+
 // D6: null means "unavailable" (model missing from LiteLLM's pricing map, or
 // no successful responses yet) — rendered as an em dash, never as $0, which
 // would misleadingly imply the model is free to run.
@@ -27,7 +35,7 @@ export function LeaderboardTable({ entries }: { entries: LeaderboardEntry[] }) {
     );
   }
 
-  const sorted = [...entries].sort((a, b) => b.elo_rating - a.elo_rating);
+  const sorted = [...entries].sort((a, b) => b.elo_rating_llm_judge - a.elo_rating_llm_judge);
 
   return (
     <div className="overflow-x-auto">
@@ -35,7 +43,8 @@ export function LeaderboardTable({ entries }: { entries: LeaderboardEntry[] }) {
         <thead>
           <tr className="text-left text-neutral-400 border-b border-neutral-800">
             <th className="py-2 pr-4 font-medium">Model</th>
-            <th className="py-2 pr-4 font-medium">Elo</th>
+            <th className="py-2 pr-4 font-medium">Elo (LLM judge)</th>
+            <th className="py-2 pr-4 font-medium">Elo (Human)</th>
             <th className="py-2 pr-4 font-medium">Runs</th>
             <th className="py-2 pr-4 font-medium">Faithfulness</th>
             <th className="py-2 pr-4 font-medium">Toxicity</th>
@@ -52,7 +61,12 @@ export function LeaderboardTable({ entries }: { entries: LeaderboardEntry[] }) {
                 <div className="font-medium">{entry.display_name}</div>
                 <div className="text-neutral-500 text-xs">{entry.provider}</div>
               </td>
-              <td className="py-3 pr-4 tabular-nums">{Math.round(entry.elo_rating)}</td>
+              <td className="py-3 pr-4 tabular-nums">
+                {formatElo(entry.elo_rating_llm_judge, entry.llm_judge_comparison_count)}
+              </td>
+              <td className="py-3 pr-4 tabular-nums">
+                {formatElo(entry.elo_rating_human, entry.human_comparison_count)}
+              </td>
               <td className="py-3 pr-4 tabular-nums text-neutral-400">{entry.response_count}</td>
               <td className="py-3 pr-4 tabular-nums">{formatMetric(entry.metric_averages.faithfulness)}</td>
               <td className="py-3 pr-4 tabular-nums">{formatMetric(entry.metric_averages.toxicity)}</td>

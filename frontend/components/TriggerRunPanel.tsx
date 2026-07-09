@@ -1,21 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth";
-import { ApiError, createRun, getRunContext } from "@/lib/api";
+import { ApiError, createRun, getRun, getRunContext } from "@/lib/api";
 import type { RunContext } from "@/lib/types";
 
 type PanelState =
   | { status: "loading-context" }
   | { status: "ready"; context: RunContext; selectedModelIds: number[] }
-  | { status: "running" }
+  | { status: "running"; runId: number }
   | { status: "done" }
   | { status: "error"; message: string };
+
+const POLL_INTERVAL_MS = 2000;
 
 export function TriggerRunPanel({ onRunComplete }: { onRunComplete: () => void }) {
   const { token } = useAuth();
   const [state, setState] = useState<PanelState>({ status: "loading-context" });
+  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -43,6 +46,48 @@ export function TriggerRunPanel({ onRunComplete }: { onRunComplete: () => void }
     };
   }, [token]);
 
+  // Extracted so the effect's dependency array is a plain variable, not a
+  // conditional expression ESLint can't statically check.
+  const runningRunId = state.status === "running" ? state.runId : null;
+
+  // Phase 5: POST /runs returns immediately with status "running" — the
+  // Celery chord processes it asynchronously. Poll GET /runs/{id} until it
+  // reaches a terminal state, then stop.
+  useEffect(() => {
+    if (runningRunId === null) {
+      if (pollTimer.current) {
+        clearInterval(pollTimer.current);
+        pollTimer.current = null;
+      }
+      return;
+    }
+
+    pollTimer.current = setInterval(async () => {
+      try {
+        const run = await getRun(runningRunId);
+        if (run.status === "completed" || run.status === "failed") {
+          if (pollTimer.current) clearInterval(pollTimer.current);
+          setState({ status: "done" });
+          onRunComplete();
+        }
+        // "pending"/"running" — keep polling.
+      } catch (err) {
+        if (pollTimer.current) clearInterval(pollTimer.current);
+        setState({
+          status: "error",
+          message: err instanceof ApiError ? err.message : "Failed to check run status.",
+        });
+      }
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      if (pollTimer.current) clearInterval(pollTimer.current);
+    };
+    // onRunComplete is a stable useCallback from the parent (HomePage's
+    // refresh) — included so exhaustive-deps is satisfied without
+    // suppression, and safe since a stable reference never re-arms the timer.
+  }, [runningRunId, onRunComplete]);
+
   if (!token) {
     return (
       <div className="rounded border border-neutral-800 p-4 text-sm text-neutral-400">
@@ -65,8 +110,8 @@ export function TriggerRunPanel({ onRunComplete }: { onRunComplete: () => void }
   if (state.status === "running") {
     return (
       <div className="text-sm text-neutral-400">
-        Running evaluation — this calls real providers and a judge model for each selected model, so it
-        can take a little while…
+        Running evaluation — dispatched to the async pipeline (one task per question×model pair). This
+        calls real providers and a judge model, so it can take a little while…
       </div>
     );
   }
@@ -99,15 +144,13 @@ export function TriggerRunPanel({ onRunComplete }: { onRunComplete: () => void }
 
   async function handleRun() {
     if (!token) return;
-    setState({ status: "running" });
     try {
-      await createRun(token, {
+      const run = await createRun(token, {
         project_id: context.project_id,
         dataset_version_id: context.dataset_version_id,
         model_ids: selectedModelIds,
       });
-      setState({ status: "done" });
-      onRunComplete();
+      setState({ status: "running", runId: run.id });
     } catch (err) {
       setState({
         status: "error",

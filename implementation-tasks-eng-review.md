@@ -93,11 +93,11 @@ placeholder code" rule rules out).
   averages. 4/4 tests pass. Caught a real bug: `str(MetricName.TOXICITY)`
   returns `"MetricName.TOXICITY"`, not `"toxicity"` (standard `str,Enum`
   `__str__` behavior) — fixed to use `.value`.
-- [x] **T-runs-wiring (P1)** — `api/routes/runs.py` — POST /runs now actually
-  executes the orchestrator synchronously and returns the completed Run;
-  `LLMRunner`/`EvaluationService` moved to FastAPI dependencies
-  (`get_llm_runner`/`get_evaluation_service`) so tests can override them with
-  fakes instead of making real provider/judge API calls. 6/6 tests pass.
+- [x] **T-runs-wiring (P1)** — `api/routes/runs.py` — POST /runs executed the
+  orchestrator synchronously via injected `LLMRunner`/`EvaluationService`
+  FastAPI dependencies. **Superseded in Phase 5** — see T7 below;
+  `get_llm_runner`/`get_evaluation_service` were removed from
+  `core/deps.py` once nothing depended on them anymore.
 - [x] **T-context (P1)** — `api/routes/context.py` — `GET /me/run-context` so
   the frontend never hardcodes project/dataset-version/model IDs. 3/3 tests pass.
 - [x] **T-schema-fix (P1, cross-cutting)** — all 6 enum columns
@@ -128,17 +128,100 @@ placeholder code" rule rules out).
     actually-running processes, not just mocked unit tests.
 
 ## Phase 5: Async layer
-- [ ] **T7 (P1, human: ~3h / CC: ~20min)** — workers — Celery task per
+- [x] **T7 (P1, human: ~3h / CC: ~20min)** — workers — Celery task per
   (question, provider) pair with asyncio.run() bridge
   - Surfaced by: D1, D12
   - Files: `workers/eval_tasks.py`
   - Verify: test asserts N tasks enqueued for N pairs, not 1 per Run
+  - Done: `dispatch_run()` builds one `run_pair_task` signature per
+    (question, model) pair under a `chord`, callback `mark_run_completed_task`
+    fires only once every pair finishes. 4/4 unit tests pass (dispatch count/
+    args, fresh-engine-per-task persistence, completion marking).
+    `api/routes/runs.py` rewritten: POST /runs now validates, commits, and
+    dispatches — returns immediately with `status: running`, no longer waits
+    for execution. Added `GET /runs/{id}` for polling (D2: public, no auth).
+    Also extracted `RunOrchestrator.mark_completed`/`load_sampled_questions`
+    out to `RunRepository`/`QuestionRepository` — they never needed the
+    LLM/eval dependencies, same smell as the earlier `mark_completed` fix,
+    caught before it shipped as a `None`-dependency hack this time.
+    **Verified with a real Celery worker** (`--pool=solo`, native Windows —
+    Constraints' Docker-Linux-container requirement is the production
+    target; solo pool is a pragmatic native smoke-test choice), real Redis,
+    real Postgres: triggered a run via the live API, watched the worker log
+    process 15 `run_pair` tasks (5 questions x 3 models) then fire the
+    chord callback automatically, confirmed `GET /runs/1` reached
+    `completed`, and queried Postgres directly to confirm all 15 Response
+    rows persisted with `status=failed` (dummy API keys) and isolated,
+    readable error messages — D3's failure isolation holding at the real
+    infrastructure level, not just in mocks. Found and fixed along the way:
+    reusing a cached async engine across separate `asyncio.run()` calls
+    crashes outright (asyncpg connections are bound to the event loop that
+    created them) — verified with a standalone repro before designing the
+    fresh-engine-per-task pattern around it, not assumed.
 
 ## Phase 6: Arena/Elo
-- [ ] **T9 (P1, human: ~2h / CC: ~15min)** — elo — Row-level locked Elo updates
+- [x] **T9 (P1, human: ~2h / CC: ~15min)** — elo — Row-level locked Elo updates
   - Surfaced by: D4
   - Files: `services/elo_service.py`
   - Verify: test fires N concurrent comparisons, asserts final Elo reflects all N
+  - Done: 7/7 unit tests + 1 real-concurrency test against the actual
+    Postgres container (SQLite's single-writer model would mask a broken
+    lock, so this one specifically needs a real DB). Locks both LLMModel
+    rows in ascending-id order regardless of comparison A/B order, avoiding
+    a deadlock between concurrent comparisons on the same pair in reversed
+    order. **Manually verified the test has teeth**: removed
+    `.with_for_update()`, confirmed the concurrency test fails reliably
+    (lost updates, off by 12-46 points across 3 runs), restored it, confirmed
+    it passes reliably — did this twice across the session (once before, once
+    after a later test-cleanup refactor accidentally introduced a bug, see
+    below).
+  - Schema: split `LLMModel.elo_rating` into `elo_rating_llm_judge` and
+    `elo_rating_human` (new migration `ee326edbe45e`, backfills existing
+    values, verified upgrade/downgrade against real Postgres) — the
+    office-hours design doc's original Phase 6 spec calls for showing these
+    separately, not blended.
+- [x] **T-arena-judge (P1)** — `services/arena_judge.py` — blind LLM-judged
+  pairwise comparison. Randomizes A/B slot assignment per call to control
+  for judge position bias (a documented LLM-judge failure mode), and maps
+  the verdict back through that randomization to the correct model —
+  `services/arena_service.py` has 5/5 tests specifically covering all four
+  swapped/unswapped × A/B combinations, since a naive implementation could
+  silently misattribute wins under the swap case.
+- [x] **T-arena-dispatch (P1)** — `workers/eval_tasks.py` — after a Run's
+  chord completes, dispatches one `arena_judge_pair_task` per unique model
+  pair per question among SUCCESSFUL responses only (C(N,2) pairs for N
+  successful models on a question; 0 for a question with <2 successes).
+  6/6 tests pass.
+- [x] **T-arena-routes (P1)** — `api/routes/arena.py` — `GET
+  /arena/next-comparison` (blind pairing, D2: public/no-auth since voting
+  is zero-cost) + `POST /arena/vote` (human votes, project_id derived from
+  the response's Run server-side, never trusted from the client). 6/6 tests
+  pass.
+  - **Verified live**: real backend + real Postgres, seeded two genuine
+    successful responses, fetched a real blind comparison via curl (payload
+    confirmed to carry no model_id/provider), cast a real vote, confirmed
+    `elo_rating_human` moved and `elo_rating_llm_judge` didn't (D4/Phase 6
+    isolation holding through the actual HTTP+DB path).
+  - Found and fixed along the way: `test_concurrent_comparisons_no_lost_updates`
+    runs against the real persistent dev Postgres and was leaving permanent
+    debris (phantom users/models/comparisons) on every run — added
+    cleanup via a `finally` block; caught via this session's live smoke
+    test, which surfaced 16 accumulated phantom models. A subsequent edit
+    to add that cleanup briefly left 3 lines of the test's own assertions
+    dangling outside the `try/finally` structure (using a closed session) —
+    caught immediately by running the test, not left in the codebase.
+- [x] **T-leaderboard-elo-split (P1)** — `api/routes/leaderboard.py` +
+  frontend — leaderboard shows `elo_rating_llm_judge`/`elo_rating_human`
+  as two columns with comparison counts alongside (a bare Elo number with
+  no sample size is misleading — one win swings it by K_FACTOR=32).
+  2/2 new tests pass.
+- [x] **T-frontend-arena (P1)** — `frontend/app/arena/page.tsx` — blind
+  voting UI (fetch comparison → vote A/B/Tie → see result → next). Builds,
+  type-checks, lints clean. Two more `set-state-in-effect`/exhaustive-deps
+  issues fixed properly (split fetch-vs-reset responsibilities between the
+  Effect and the button handler; extracted a derived variable instead of a
+  conditional expression in a dependency array) rather than suppressed —
+  same pattern as Phase 4's auth-token fix.
 
 ## Phase 7: Regression engine
 - [ ] **T10 (P2, human: ~3h / CC: ~20min)** — regression — RegressionRun pins
@@ -148,8 +231,17 @@ placeholder code" rule rules out).
   - Verify: same-version diff test + mismatched-version rejection test
 
 ## Phase 5 (cross-cutting): Caching
-- [ ] **T11 (P2, human: ~2h / CC: ~15min)** — leaderboard — Redis cache for
+- [x] **T11 (P2, human: ~2h / CC: ~15min)** — leaderboard — Redis cache for
   leaderboard aggregates, invalidated on EvaluationResult write
   - Surfaced by: D13
-  - Files: `services/leaderboard_service.py`
+  - Files: `services/leaderboard_cache.py`
   - Verify: test writes a result, asserts cache invalidated and next read fresh
+  - Done: 4/4 cache-module tests + 1 leaderboard-serving-stale-data-from-
+    cache test pass, all against the real Redis container (docker-compose),
+    not mocked. Fails open (cache-miss behavior, never a 500) if Redis is
+    unreachable — tested by pointing the client at a dead port. Write-
+    invalidation only, no TTL yet (TODOS.md item 2 — deferred correctly,
+    the trigger condition "second write path" still hasn't occurred).
+    Real bug caught along the way: `str(MetricName.TOXICITY)` renders as
+    `"MetricName.TOXICITY"`, not `"toxicity"` — fixed in leaderboard.py
+    during this phase's cache wiring (see T-leaderboard above).

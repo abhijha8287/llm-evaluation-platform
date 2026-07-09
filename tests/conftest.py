@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.models  # noqa: F401 - populates Base.metadata; must import before any create_all
 from app.core.database import Base, get_session
-from app.core.deps import get_evaluation_service, get_llm_runner
 from app.evaluation.scoring_service import EvaluationService, MetricScore
 from app.llm.runner import LLMRunner, RunResult
 from app.models.evaluation_result import EvaluationStatus, MetricName
@@ -54,7 +53,7 @@ async def db_session(session_factory) -> AsyncSession:
 def make_fake_llm_runner(default_output: str = "fake answer") -> LLMRunner:
     """Never makes a real provider call. Default: every call succeeds with a
     canned output — tests that need specific per-model/per-failure behavior
-    reassign .run's side_effect after construction (see test_runs.py)."""
+    reassign .run's side_effect after construction (see test_eval_tasks.py)."""
     runner = LLMRunner()
     runner.run = AsyncMock(
         return_value=RunResult(
@@ -87,13 +86,11 @@ async def test_client(session_factory):
     Does NOT run the production lifespan (which seeds via a Postgres-backed
     engine) — see the seeded_demo_user fixture for the test-DB equivalent.
 
-    get_llm_runner/get_evaluation_service are overridden with safe fakes by
-    default — FastAPI resolves ALL declared Depends() for a route before the
-    route body runs, so even a request that will 404 early (e.g. unowned
-    project) would otherwise try to construct a real EvaluationService,
-    which requires a real API key just to construct. Tests that need
-    specific run-execution behavior reassign the fake's .run/.score_response
-    after the fixture yields the client."""
+    Phase 5: POST /runs no longer executes synchronously (dispatch_run hands
+    off to Celery instead — see app/workers/eval_tasks.py), so there's no
+    LLMRunner/EvaluationService dependency left on the route to fake here.
+    Tests that need to verify dispatch behavior patch
+    app.api.routes.runs.dispatch_run directly (see tests/test_runs.py)."""
     from app.main import app
 
     async def override_get_session():
@@ -101,8 +98,6 @@ async def test_client(session_factory):
             yield session
 
     app.dependency_overrides[get_session] = override_get_session
-    app.dependency_overrides[get_llm_runner] = lambda: make_fake_llm_runner()
-    app.dependency_overrides[get_evaluation_service] = lambda: make_fake_evaluation_service()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client

@@ -12,6 +12,9 @@ export function Header() {
         LLM Evaluation Platform
       </Link>
       <nav className="flex items-center gap-4 text-sm">
+        <Link href="/arena" className="text-neutral-400 hover:text-neutral-100 transition-colors">
+          Arena
+        </Link>
         {token ? (
           <button
             onClick={() => setToken(null)}

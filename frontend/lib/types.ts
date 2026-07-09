@@ -6,11 +6,37 @@ export interface LeaderboardEntry {
   model_id: number;
   display_name: string;
   provider: string;
-  elo_rating: number;
+  // office-hours design doc Phase 6: LLM-judged and human-judged Elo are
+  // shown separately, not blended into one number.
+  elo_rating_llm_judge: number;
+  elo_rating_human: number;
+  llm_judge_comparison_count: number;
+  human_comparison_count: number;
   response_count: number;
   avg_latency_ms: number | null;
   avg_cost_usd: number | null;
   metric_averages: Record<string, number>;
+}
+
+export interface ArenaComparisonOption {
+  question_id: number;
+  question_text: string;
+  response_1_id: number;
+  response_1_text: string;
+  response_2_id: number;
+  response_2_text: string;
+}
+
+export interface VoteRequest {
+  question_id: number;
+  response_1_id: number;
+  response_2_id: number;
+  winner_response_id: number | null;
+}
+
+export interface VoteResponse {
+  comparison_id: number;
+  winner_model_id: number | null;
 }
 
 export interface ModelOption {

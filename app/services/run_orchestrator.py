@@ -1,31 +1,40 @@
-from datetime import datetime, timezone
-
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.evaluation.scoring_service import EvaluationService
 from app.llm.runner import LLMRunner
-from app.models.dataset import DatasetVersionQuestion
 from app.models.evaluation_result import EvaluationResult
 from app.models.llm_model import LLMModel
 from app.models.question import Question
 from app.models.response import Response, ResponseStatus
-from app.models.run import Run, RunStatus
+from app.models.run import Run
+from app.repositories.question_repository import QuestionRepository
+from app.repositories.run_repository import RunRepository
 from app.services.cost_service import compute_cost_usd
 
 
 class RunOrchestrator:
-    """Phase 4: synchronous execution — for each (question, provider) pair in
-    the Run's DatasetVersion sample, call the model, persist the Response,
-    and (on success) score it via the shared EvaluationService (D8).
+    """Phase 4 gave this a synchronous `execute()` — run every (question,
+    model) pair in-process, in one HTTP request. Phase 5 (eng-review D1/D12)
+    dispatches each pair as its own Celery task instead (see
+    app/workers/eval_tasks.py), calling the same `run_pair()` this class
+    always used internally — that method was deliberately public-shaped
+    (single-pair, self-contained, flush-not-commit) from Phase 4 onward so
+    this move required no rewrite, just a new caller.
 
-    Deliberately structured as one unit of work per (question, model) pair
-    already, not a single big loop over everything — eng-review D12 moves
-    this exact unit into a Celery task in Phase 5 without changing the core
-    logic, so that move is mechanical rather than a rewrite.
+    `execute()` is kept: it's still what the test suite uses to exercise the
+    full orchestration logic without needing a live Celery worker, and it
+    remains a legitimate "run synchronously" path (e.g. for local dev
+    without Celery running).
 
-    Flushes but does not commit — the caller owns the transaction boundary,
-    same convention as app/api/routes/runs.py."""
+    Only holds what actually needs llm_runner/evaluation_service (i.e.
+    run_pair). Loading the question sample and marking a run complete need
+    neither dependency, so they live on QuestionRepository/RunRepository
+    instead — constructing a real EvaluationService (which requires a real
+    API key just to build, see Phase 3's eng-review note) purely to call a
+    method that never touches it would be the same smell already fixed once
+    in this file for mark_completed.
+
+    Flushes but does not commit — the caller owns the transaction boundary."""
 
     def __init__(
         self, session: AsyncSession, llm_runner: LLMRunner, evaluation_service: EvaluationService
@@ -35,17 +44,17 @@ class RunOrchestrator:
         self.evaluation_service = evaluation_service
 
     async def execute(self, run: Run, models: list[LLMModel]) -> None:
-        questions = await self._load_sampled_questions(run.dataset_version_id)
+        questions = await QuestionRepository(self.session).list_for_dataset_version(
+            run.dataset_version_id
+        )
 
         for question in questions:
             for model in models:
-                await self._run_one_pair(run, question, model)
+                await self.run_pair(run, question, model)
 
-        run.status = RunStatus.COMPLETED
-        run.completed_at = datetime.now(timezone.utc)
-        await self.session.flush()
+        await RunRepository(self.session).mark_completed(run)
 
-    async def _run_one_pair(self, run: Run, question: Question, model: LLMModel) -> None:
+    async def run_pair(self, run: Run, question: Question, model: LLMModel) -> None:
         result = await self.llm_runner.run(provider_model=model.name, prompt=question.text)
         cost_usd = compute_cost_usd(model.name, result.prompt_tokens, result.completion_tokens)
 
@@ -81,12 +90,3 @@ class RunOrchestrator:
                 )
             )
         await self.session.flush()
-
-    async def _load_sampled_questions(self, dataset_version_id: int) -> list[Question]:
-        stmt = (
-            select(Question)
-            .join(DatasetVersionQuestion, DatasetVersionQuestion.question_id == Question.id)
-            .where(DatasetVersionQuestion.dataset_version_id == dataset_version_id)
-        )
-        result = await self.session.execute(stmt)
-        return list(result.scalars().all())

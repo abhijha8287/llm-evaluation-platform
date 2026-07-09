@@ -15,10 +15,21 @@ services:
       timeout: 5s
       retries: 5
 
-# Redis, the FastAPI app, Celery workers (Linux container per Constraints —
-# Celery's multiprocessing pool is unreliable on native Windows), and the
-# Next.js frontend are added in their respective phases (5, 2, 5, 4/8) rather
-# than stubbed here now — see design doc Next Steps and TODOS.md.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+# Celery workers (Constraints: Linux container even on Windows dev — Celery's
+# multiprocessing pool is unreliable on native Windows), the FastAPI app, and
+# the Next.js frontend are containerized in Phase 9's Docker Compose
+# finalization — see design doc Next Steps. Phase 5-8 run them locally
+# (uvicorn --reload / celery -A / npm run dev) against these two services.
 
 volumes:
   postgres_data:
