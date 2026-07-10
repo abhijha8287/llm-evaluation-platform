@@ -25,9 +25,81 @@ services:
       timeout: 5s
       retries: 5
 
-  # Phase 9 (monitoring). Scrapes the natively-running FastAPI/Celery
-  # processes via host.docker.internal — see monitoring/prometheus.yml's
-  # comment for why, and what changes once Phase 10 containerizes them too.
+  # Phase 10. `profiles: ["full"]` — these three don't start on a bare
+  # `docker compose up`, keeping Phase 5-9's native-dev loop (uvicorn
+  # --reload / celery -A / npm run dev, all faster to iterate on than a
+  # container rebuild) as the default. `docker compose --profile full up
+  # --build` brings up the entire stack in containers instead — the
+  # deployment-ready, production-like mode this phase adds.
+  api:
+    build: .
+    profiles: ["full"]
+    env_file:
+      # required: false — a fresh clone has no .env until you `cp
+      # .env.example .env` and fill in real keys (see README); the compose
+      # file itself must still be valid without one.
+      - path: .env
+        required: false
+    environment:
+      # Overrides .env's localhost values — inside the compose network,
+      # postgres/redis are reachable by service name, not localhost.
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/llm_eval
+      REDIS_URL: redis://redis:6379/0
+    # Migrations run here, not in a separate init container — alembic
+    # upgrade is idempotent (safe to run on every start) and this is a
+    # single-instance demo deployment, not a multi-replica production
+    # cluster where concurrent migration races would be a real concern.
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery-worker:
+    build: .
+    profiles: ["full"]
+    env_file:
+      # required: false — a fresh clone has no .env until you `cp
+      # .env.example .env` and fill in real keys (see README); the compose
+      # file itself must still be valid without one.
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/llm_eval
+      REDIS_URL: redis://redis:6379/0
+    # --concurrency=1, not the prefork default — see app/monitoring/
+    # metrics.py's module docstring: this app's Prometheus instrumentation
+    # assumes one worker process per container (one prometheus_client
+    # registry, one /metrics port). Linux, so no --pool=solo Windows
+    # workaround needed here — just capped concurrency.
+    command: celery -A app.workers.celery_app worker --concurrency=1 --loglevel=info
+    ports:
+      - "9808:9808"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    profiles: ["full"]
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+  # Phase 9 (monitoring). Scrapes FastAPI/Celery via host.docker.internal —
+  # works unchanged whether they're running natively (default profile) or
+  # containerized (`--profile full`), since the api/celery-worker services
+  # above also publish their ports to the host — see monitoring/
+  # prometheus.yml's comment.
   prometheus:
     image: prom/prometheus:v2.55.1
     volumes:
@@ -66,12 +138,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-# Celery workers (Constraints: Linux container even on Windows dev — Celery's
-# multiprocessing pool is unreliable on native Windows), the FastAPI app, and
-# the Next.js frontend are containerized in Phase 10's Docker Compose
-# finalization — see design doc Next Steps. Phase 5-9 run them locally
-# (uvicorn --reload / celery -A / npm run dev) against the services here.
 
 volumes:
   postgres_data:

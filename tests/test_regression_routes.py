@@ -11,7 +11,6 @@ from app.models.prompt import PromptTemplate, PromptVersion
 from app.models.question import Question, QuestionType
 from app.models.regression import RegressionResult, RegressionRun, RegressionStatus
 from app.models.run import Run, RunStatus
-from app.models.user import User
 
 
 def _patch_dispatch(monkeypatch) -> MagicMock:

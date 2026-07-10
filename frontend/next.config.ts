@@ -8,6 +8,10 @@ const nextConfig: NextConfig = {
     // the workspace root. Pin it explicitly.
     root: path.join(__dirname),
   },
+  // Phase 10: traces the minimal set of files/deps a production server
+  // actually needs into .next/standalone — the Docker image copies just
+  // that output instead of the full node_modules tree.
+  output: "standalone",
 };
 
 export default nextConfig;

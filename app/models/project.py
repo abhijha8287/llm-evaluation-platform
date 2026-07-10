@@ -1,9 +1,17 @@
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    # See app/models/comparison.py's TYPE_CHECKING comment for why.
+    from app.models.dataset import Dataset
+    from app.models.prompt import PromptTemplate
+    from app.models.run import Run
+    from app.models.user import User
 
 
 class Project(Base):

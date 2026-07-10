@@ -7,7 +7,6 @@ from sqlalchemy import select
 from app.core.seed_data import DEMO_USER_EMAIL, seed_all_demo_data
 from app.models.dataset import DatasetVersion
 from app.models.llm_model import LLMModel
-from app.models.project import Project
 from app.models.question import QuestionType
 from app.models.user import User
 
@@ -26,8 +25,6 @@ async def test_seed_all_demo_data_is_idempotent(db_session):
 async def test_seed_creates_dataset_version_with_both_question_types(db_session):
     await seed_all_demo_data(db_session, demo_password="pw")
 
-    user = (await db_session.execute(select(User).where(User.email == DEMO_USER_EMAIL))).scalar_one()
-    project = (await db_session.execute(select(Project).where(Project.owner_id == user.id))).scalar_one()
     version = (
         (await db_session.execute(select(DatasetVersion).where(DatasetVersion.dataset_id.in_(
             select(DatasetVersion.dataset_id)

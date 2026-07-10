@@ -10,7 +10,6 @@ covered separately in tests/test_eval_tasks.py."""
 
 from unittest.mock import MagicMock
 
-from sqlalchemy import select
 
 import app.api.routes.runs as runs_module
 from app.core.config import get_settings

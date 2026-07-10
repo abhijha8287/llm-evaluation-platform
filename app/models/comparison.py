@@ -1,10 +1,20 @@
 import enum
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum as SAEnum, Float, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    # Import-time-only forward refs for the Mapped[...] relationship type
+    # hints below — TYPE_CHECKING is always False at runtime, so this can
+    # never introduce a circular import; it only satisfies static analysis
+    # (ruff's F821, type checkers) for SQLAlchemy's string-based forward
+    # references, which resolve at ORM mapper-configuration time instead.
+    from app.models.llm_model import LLMModel
+    from app.models.question import Question
 
 
 class VoterType(str, enum.Enum):

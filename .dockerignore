@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.db
+.env
+.coverage
+htmlcov/
+.git/
+.github/
+frontend/
+tests/
+monitoring/
+.claude/
+*.md

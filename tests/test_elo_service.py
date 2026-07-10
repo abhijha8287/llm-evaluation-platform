@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.exc import OperationalError
 
 from app.models.comparison import Comparison, VoterType
-from app.models.dataset import Dataset, DatasetVersion
+from app.models.dataset import Dataset
 from app.models.llm_model import DEFAULT_ELO_RATING, LLMModel
 from app.models.project import Project
 from app.models.question import Question, QuestionType

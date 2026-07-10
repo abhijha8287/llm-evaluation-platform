@@ -2,7 +2,6 @@
 Pass Rate / Faithfulness Trend dashboard charts — one point per (run, model)
 pair, ordered by run creation time."""
 
-from sqlalchemy import select
 
 from app.models.dataset import Dataset, DatasetVersion
 from app.models.evaluation_result import EvaluationResult, EvaluationStatus, MetricName

@@ -1,10 +1,17 @@
 import enum
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    # See app/models/comparison.py's TYPE_CHECKING comment for why.
+    from app.models.dataset import DatasetVersion
+    from app.models.project import Project
+    from app.models.response import Response
 
 
 class RunStatus(str, enum.Enum):
