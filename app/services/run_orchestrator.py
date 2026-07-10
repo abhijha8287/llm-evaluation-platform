@@ -7,6 +7,7 @@ from app.models.llm_model import LLMModel
 from app.models.question import Question
 from app.models.response import Response, ResponseStatus
 from app.models.run import Run
+from app.monitoring.metrics import RESPONSE_COST_USD_TOTAL
 from app.repositories.question_repository import QuestionRepository
 from app.repositories.run_repository import RunRepository
 from app.services.cost_service import compute_cost_usd
@@ -29,10 +30,11 @@ class RunOrchestrator:
     Only holds what actually needs llm_runner/evaluation_service (i.e.
     run_pair). Loading the question sample and marking a run complete need
     neither dependency, so they live on QuestionRepository/RunRepository
-    instead — constructing a real EvaluationService (which requires a real
-    API key just to build, see Phase 3's eng-review note) purely to call a
-    method that never touches it would be the same smell already fixed once
-    in this file for mark_completed.
+    instead — needing an EvaluationService purely to call a method that
+    never touches it would be the same smell already fixed once in this
+    file for mark_completed. (EvaluationService's judge-model construction
+    is now lazy — TODOS.md item 4 — but the dependency-shape argument for
+    keeping this class narrow holds regardless.)
 
     Flushes but does not commit — the caller owns the transaction boundary."""
 
@@ -68,6 +70,11 @@ class RunOrchestrator:
         prompt = prompt_override if prompt_override is not None else question.text
         result = await self.llm_runner.run(provider_model=model.name, prompt=prompt)
         cost_usd = compute_cost_usd(model.name, result.prompt_tokens, result.completion_tokens)
+        # D6: null (model missing from LiteLLM's pricing map) is never
+        # counted as 0 — same null-vs-zero discipline as the leaderboard's
+        # avg_cost_usd, applied here to the cumulative metric too.
+        if cost_usd is not None:
+            RESPONSE_COST_USD_TOTAL.labels(model=model.name).inc(cost_usd)
 
         response = Response(
             run_id=run.id,

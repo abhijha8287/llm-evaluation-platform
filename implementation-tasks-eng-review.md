@@ -379,3 +379,97 @@ placeholder code" rule rules out).
     surfaced a genuine dev-environment gap (no `.env`/API keys configured,
     `openai_api_key` defaults to `""`) — a pre-existing environment
     limitation unrelated to this phase's code, not a regression.
+
+## Phase 9: Monitoring
+- [x] **T15 (P1, human: ~4h / CC: ~30min)** — observability — Prometheus
+  instrumentation across both processes; Grafana dashboard, provisioned
+  - Surfaced by: design doc Phase 9 — "Prometheus + Grafana wired to the
+    FastAPI/Celery services."
+  - Files: `app/monitoring/metrics.py` (every metric definition, one shared
+    place per D8's philosophy), instrumented in `llm/runner.py`
+    (`llm_provider_call*`), `evaluation/scoring_service.py`
+    (`judge_eval_*`), `services/run_orchestrator.py`
+    (`response_cost_usd_total`), `workers/celery_app.py` (`celery_task*` via
+    `task_prerun`/`task_postrun` signals — one shared hook covering all five
+    task types, not duplicated per task), `main.py` (`GET /metrics` +
+    HTTP request middleware)
+  - Key architectural call, verified not assumed: FastAPI and the Celery
+    worker are separate OS processes (D1), each single-concurrency
+    (`--pool=solo`/no `--workers`), so each gets its OWN independent
+    prometheus_client registry and its OWN `/metrics` endpoint — no
+    multiprocess-mode machinery needed (that's only for multiple OS
+    processes sharing ONE logical service). Verified the exact Celery
+    signal semantics against the installed library's own source before
+    depending on them: `worker_process_init` fires once for the solo pool
+    (`celery/concurrency/solo.py`'s `TaskPool.__init__`) and once per forked
+    child for prefork — guarded with try/except around `start_http_server`
+    so a prefork worker with `concurrency > 1` (outside this app's
+    documented single-concurrency scope) degrades to "first child's metrics
+    exposed" instead of crashing the whole worker.
+  - HTTP metrics labeled by the *templated* route path (`request.scope["route"].path`,
+    e.g. `/runs/{run_id}`), not the raw path — verified FastAPI's `APIRoute.matches()`
+    sets `scope["route"]` in the installed version (Starlette's own base `Route`
+    does not, in this version) before depending on it; unmatched paths collapse to one
+    `"unmatched"` label so an arbitrary bad-path probe can't grow cardinality.
+  - `monitoring/prometheus.yml` scrapes both processes via
+    `host.docker.internal` (Prometheus runs in Docker, FastAPI/Celery still
+    run natively per Phase 5-8's established split — see the file's comment
+    for what changes once Phase 10 containerizes them too).
+    `monitoring/grafana/provisioning/` auto-provisions the Prometheus
+    datasource and a 9-panel dashboard (`llm-eval-platform.json`) covering
+    HTTP rate/latency, LLM provider call rate/latency, judge call
+    rate/failure-rate, Celery task throughput/duration, and cost accrual
+    rate — no manual clicking required after `docker compose up`.
+  - `docker-compose.yml`: added `prometheus`/`grafana` services. Also fixed
+    a pre-existing mislabeled comment claiming Phase 9 does Docker Compose
+    finalization — that's Phase 10 per the design doc; this phase only adds
+    the two new services.
+  - Verify: `pytest tests/test_metrics.py`
+  - Done: 8/8 new tests — real counter/histogram value assertions at every
+    call site (LLMRunner success/timeout, EvaluationService success/failure,
+    RunOrchestrator cost increment, Celery signal handlers directly
+    invoked, `GET /metrics` end-to-end through the test client), not just
+    "importing metrics.py doesn't crash." 132/132 full backend suite
+    passing (8 new), zero regressions. `ruff check` clean.
+  - **Live-verified against the real stack** (not just unit tests): started
+    real Prometheus + Grafana containers via `docker compose up`, confirmed
+    both scrape targets `up` via Prometheus's own `/api/v1/targets`,
+    triggered a real evaluation run, confirmed the dashboard loaded via
+    Grafana's API (9/9 panels present) and that a real panel query through
+    Grafana's datasource proxy returned real scraped data
+    (`llm_provider_calls_total{model="claude-haiku-4-5",status="failed"}`).
+  - **Real bug found via this live verification, not fixed silently (flagged
+    to the user, documented in TODOS.md item 4)**: `EvaluationService`
+    (the judge model) is constructed before `LLMRunner.run()` ever executes
+    in `eval_tasks.py`'s task bodies. An empty/invalid judge API key
+    currently crashes the entire Celery task (and therefore the whole
+    chord) before any provider call happens — bypassing D3's per-response
+    provider-failure isolation entirely, since no response is ever
+    generated at all rather than being recorded as FAILED. Confirmed the
+    fix's premise is sound: dispatching directly against a worker with a
+    non-empty dummy key let `LLMRunner.run()` execute and fail gracefully
+    (`status="failed"`, task itself `SUCCESS`) exactly as D3 intends.
+
+## Cross-cutting fix (post-Phase 9): judge-model construction ordering
+- [x] **T16 (P1, human: ~1h / CC: ~15min)** — reliability — fixed TODOS.md
+  item 4 (`EvaluationService`'s eager `GPTModel` construction bypassing D3)
+  at the user's request, immediately after Phase 9 flagged it
+  - Files: `evaluation/scoring_service.py` (lazy `_get_judge()`, cached
+    success/failure), `services/run_orchestrator.py` (stale comment fixed)
+  - Verify: `pytest tests/test_scoring_service.py`
+  - Done: 3 new regression tests (construction never raises; a bad key
+    degrades every applicable metric to FAILED instead of crashing;
+    construction is attempted exactly once per instance, not once per
+    metric — verified by patching `GPTModel` and asserting a single call
+    across 4 metrics). 135/135 full backend suite passing, `ruff check`
+    clean.
+  - **Live-verified the actual before/after, not just the unit tests**:
+    restarted the real Celery worker with no `OPENAI_API_KEY` set (the
+    exact broken state) and dispatched a real `run_pair` task directly.
+    Before: `ChordError` wrapping `DeepEvalError`, zero
+    `llm_provider_calls_total` samples, no `Response` row ever created.
+    After: `LiteLLM completion()` was actually attempted, the Celery task
+    completed `SUCCESS`, `llm_provider_calls_total{model="gpt-4o-mini",
+    status="failed"}` recorded, and a real `Response` row was persisted
+    with `status=FAILED` and a genuine `AuthenticationError` message —
+    confirmed via a direct Postgres query, then cleaned up.

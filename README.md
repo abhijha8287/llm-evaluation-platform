@@ -98,6 +98,40 @@ was available in this environment to visually click through the new pages —
 noted explicitly rather than assumed working; the data-fetching logic is the
 same `useEffect`+`fetch` pattern already proven live in Phases 4/5/6.
 
+Phase 9 (monitoring) complete: Prometheus instrumentation across both
+processes — FastAPI (`GET /metrics`, HTTP request rate/latency labeled by
+templated route path, verified against the installed FastAPI's own
+`APIRoute.matches()`) and the Celery worker (its own independent `/metrics`
+on port 9808, since it's a separate OS process with its own
+prometheus_client registry — no multiprocess-mode machinery needed at this
+app's documented single-concurrency scale). Domain metrics, not just HTTP:
+`llm_provider_call_duration_seconds`/`_total` (`llm/runner.py`),
+`judge_eval_duration_seconds`/`_total` (`evaluation/scoring_service.py`),
+`response_cost_usd_total` (`services/run_orchestrator.py`),
+`celery_task_duration_seconds`/`_total` (one shared `task_prerun`/
+`task_postrun` signal hook in `workers/celery_app.py`, not duplicated per
+task). Grafana auto-provisions a 9-panel dashboard on `docker compose up` —
+no manual clicking required. 132/132 backend tests passing (8 new).
+**Live-verified**: real Prometheus + Grafana containers, confirmed both
+scrape targets `up`, triggered a real run, confirmed the dashboard's panels
+loaded via Grafana's API and a real panel query returned real scraped data
+through Grafana's own datasource proxy. **Real bug found and flagged, then
+fixed at the user's request** (TODOS.md item 4, now resolved):
+`EvaluationService` used to construct its judge model (`GPTModel`) eagerly
+in `__init__`, before `LLMRunner.run()` ever executed in `eval_tasks.py` —
+so a missing/invalid judge API key crashed the whole Celery task before any
+provider call happened, bypassing D3's per-response failure isolation
+entirely. Fixed by deferring judge construction into `score_response`'s
+existing per-metric try/except (`evaluation/scoring_service.py`), so a bad
+key now degrades to `EvaluationStatus.FAILED` per metric like any other
+judge failure, cached so it's attempted at most once per instance.
+**Live-verified before and after**: restarted the real worker with no
+`OPENAI_API_KEY` set — before the fix, `ChordError` and zero
+`llm_provider_calls_total` samples; after, the provider call actually
+executed, the Celery task completed `SUCCESS`, and a real `Response` row
+was persisted with `status=FAILED` and a genuine `AuthenticationError`
+message. 135/135 backend tests passing (3 new).
+
 ## Running locally
 
 Backend:
@@ -106,17 +140,21 @@ python -m venv .venv && .venv/Scripts/activate    # or source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env    # fill in real provider API keys
 
-docker compose up -d           # postgres + redis
+docker compose up -d           # postgres + redis + prometheus + grafana
 alembic upgrade head
 
 uvicorn app.main:app --reload                                    # API
 celery -A app.workers.celery_app worker --pool=solo --loglevel=info   # worker
 # --pool=solo is a native-Windows dev convenience; the Constraints call for
 # the worker to run in a Docker Linux container (Celery's prefork pool is
-# unreliable on native Windows) — that's how Phase 9's Docker Compose runs it.
+# unreliable on native Windows) — that's how Phase 10's Docker Compose runs it.
 
 pytest
 ```
+
+Grafana: http://localhost:3001 (anonymous viewer access, no login — see
+docker-compose.yml). Prometheus: http://localhost:9090. Both are provisioned
+automatically; no manual dashboard setup needed.
 
 Frontend (separate terminal):
 ```bash

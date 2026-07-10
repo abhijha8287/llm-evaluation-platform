@@ -25,11 +25,55 @@ services:
       timeout: 5s
       retries: 5
 
+  # Phase 9 (monitoring). Scrapes the natively-running FastAPI/Celery
+  # processes via host.docker.internal — see monitoring/prometheus.yml's
+  # comment for why, and what changes once Phase 10 containerizes them too.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    ports:
+      # 3000 is the Next.js dev server's port (see frontend's CORS note in
+      # app/main.py) — Grafana uses 3001 on the host to avoid colliding.
+      - "3001:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    environment:
+      # Anonymous viewer access — this is a local/portfolio demo dashboard,
+      # not a multi-tenant deployment; D10's "single seeded user" posture
+      # extends here too rather than adding a second auth system to manage.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 # Celery workers (Constraints: Linux container even on Windows dev — Celery's
 # multiprocessing pool is unreliable on native Windows), the FastAPI app, and
-# the Next.js frontend are containerized in Phase 9's Docker Compose
-# finalization — see design doc Next Steps. Phase 5-8 run them locally
-# (uvicorn --reload / celery -A / npm run dev) against these two services.
+# the Next.js frontend are containerized in Phase 10's Docker Compose
+# finalization — see design doc Next Steps. Phase 5-9 run them locally
+# (uvicorn --reload / celery -A / npm run dev) against the services here.
 
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:

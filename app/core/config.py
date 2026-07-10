@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # full dataset every time.
     default_sample_size: int = 25
 
+    # Phase 9: port the Celery worker process's own Prometheus /metrics
+    # server binds to (see app/workers/celery_app.py's worker_process_init
+    # handler) — separate from FastAPI's /metrics since they're different
+    # OS processes (see app/monitoring/metrics.py's module docstring).
+    celery_metrics_port: int = 9808
+
 
 @lru_cache
 def get_settings() -> Settings:

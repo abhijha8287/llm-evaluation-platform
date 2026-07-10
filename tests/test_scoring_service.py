@@ -132,3 +132,47 @@ async def test_judge_failure_on_one_metric_does_not_abort_the_others():
     assert by_name[MetricName.BIAS].status == EvaluationStatus.SUCCESS
     assert by_name[MetricName.FAITHFULNESS].status == EvaluationStatus.SUCCESS
     assert by_name[MetricName.ANSWER_RELEVANCY].status == EvaluationStatus.SUCCESS
+
+
+def test_construction_with_empty_api_key_does_not_raise():
+    """TODOS.md item 4 regression guard: constructing EvaluationService must
+    never raise, regardless of judge_api_key validity — judge-model
+    construction is deferred to the first score_response call so a bad key
+    degrades to per-metric FAILED results instead of crashing the caller
+    (eval_tasks.py's run_pair_task) before LLMRunner.run() ever executes."""
+    service = EvaluationService(judge_model="gpt-4o-mini", judge_api_key="")
+    assert service.judge_model_name == "gpt-4o-mini"
+
+
+async def test_empty_api_key_degrades_every_applicable_metric_to_failed_not_a_crash():
+    """The actual bug found in Phase 9's live verification: an empty judge
+    key used to raise DeepEvalError out of EvaluationService.__init__,
+    which — because eval_tasks.py constructed EvaluationService before ever
+    calling LLMRunner.run() — crashed the whole Celery task and its chord
+    before any provider call happened. Now the same bad key is caught here,
+    per metric, exactly like any other judge-call failure."""
+    question = _question(QuestionType.RAG, retrieval_context="Refunds accepted within 30 days.")
+    service = EvaluationService(judge_model="gpt-4o-mini", judge_api_key="")
+
+    results = await service.score_response(question, actual_output="30 days")
+
+    assert len(results) == 4
+    assert all(r.status == EvaluationStatus.FAILED for r in results)
+    assert all(r.score is None for r in results)
+    assert all(r.error_message for r in results)
+
+
+async def test_judge_construction_failure_is_cached_not_retried_per_metric():
+    """Construction is attempted at most once per EvaluationService instance
+    — a persistently bad key must not retry GPTModel construction once per
+    applicable metric (4x for a RAG question)."""
+    question = _question(QuestionType.RAG, retrieval_context="Refunds accepted within 30 days.")
+    service = EvaluationService(judge_model="gpt-4o-mini", judge_api_key="")
+
+    with patch(
+        "app.evaluation.scoring_service.GPTModel", side_effect=RuntimeError("construction attempted")
+    ) as mock_gptmodel:
+        results = await service.score_response(question, actual_output="30 days")
+
+    assert len(results) == 4
+    mock_gptmodel.assert_called_once()

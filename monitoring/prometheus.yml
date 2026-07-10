@@ -1,0 +1,29 @@
+# Phase 9. Two scrape targets, not one — FastAPI and the Celery worker are
+# separate OS processes with independent prometheus_client registries (see
+# app/monitoring/metrics.py's module docstring), so each needs its own
+# target rather than one combined endpoint.
+#
+# host.docker.internal, not localhost — Prometheus runs inside this compose
+# network while FastAPI/Celery still run natively on the host (Phase 5-8's
+# established local-dev split; see docker-compose.yml's comment). Docker
+# Desktop resolves host.docker.internal to the host machine. Once Phase 10
+# containerizes the API and worker too, these targets become the compose
+# service names (e.g. "api:8000", "celery-worker:9808") instead.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: fastapi
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          service: fastapi
+
+  - job_name: celery-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9808"]
+        labels:
+          service: celery-worker

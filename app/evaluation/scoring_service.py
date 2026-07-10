@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 
 from deepeval.metrics import AnswerRelevancyMetric, BiasMetric, FaithfulnessMetric, ToxicityMetric
@@ -6,6 +7,7 @@ from deepeval.test_case import LLMTestCase
 
 from app.models.evaluation_result import EvaluationStatus, MetricName
 from app.models.question import Question, QuestionType
+from app.monitoring.metrics import JUDGE_EVAL_CALLS_TOTAL, JUDGE_EVAL_DURATION_SECONDS
 
 _METRIC_CLASSES = {
     MetricName.FAITHFULNESS: FaithfulnessMetric,
@@ -54,14 +56,42 @@ class EvaluationService:
 
     Constraints/D6: judge model is explicit (GPTModel with an explicit
     api_key), never relying on OPENAI_API_KEY being present in the process
-    environment — verified during Phase 3 that DeepEval's metric
-    construction requires an API key eagerly (even before any network call),
-    so an implicit env-var dependency would be a real footgun here.
+    environment.
+
+    TODOS.md item 4 fix: GPTModel construction is lazy (deferred to the
+    first score_response call), not eager in __init__. Verified during
+    Phase 3 that DeepEval's GPTModel construction requires an API key
+    eagerly (raises immediately, before any network call, if the key is
+    empty/invalid) — Phase 9's live verification then found that eager
+    construction in __init__ meant a bad judge key crashed the whole caller
+    (eval_tasks.py's run_pair_task) before LLMRunner.run() ever executed,
+    bypassing D3's provider-call isolation entirely: no response was ever
+    generated, let alone recorded as FAILED. Deferring construction into
+    the per-metric try/except below means a construction failure now
+    degrades to EvaluationStatus.FAILED for every applicable metric — the
+    same shape as any other judge-call failure — instead of aborting the
+    task. Construction is attempted at most once per EvaluationService
+    instance (success or failure both cached) so a persistently bad key
+    doesn't retry GPTModel construction once per metric.
     """
 
     def __init__(self, judge_model: str, judge_api_key: str):
-        self._judge = GPTModel(model=judge_model, api_key=judge_api_key)
         self.judge_model_name = judge_model
+        self._judge_api_key = judge_api_key
+        self._judge: GPTModel | None = None
+        self._judge_construction_error: Exception | None = None
+
+    def _get_judge(self) -> GPTModel:
+        if self._judge is None and self._judge_construction_error is None:
+            try:
+                self._judge = GPTModel(model=self.judge_model_name, api_key=self._judge_api_key)
+            except Exception as exc:  # noqa: BLE001 - see class docstring;
+                # must degrade to a per-metric FAILED result, never propagate.
+                self._judge_construction_error = exc
+        if self._judge_construction_error is not None:
+            raise self._judge_construction_error
+        assert self._judge is not None
+        return self._judge
 
     async def score_response(self, question: Question, actual_output: str) -> list[MetricScore]:
         test_case = LLMTestCase(
@@ -72,15 +102,18 @@ class EvaluationService:
 
         results: list[MetricScore] = []
         for metric_name in applicable_metrics(question.type):
-            metric = _METRIC_CLASSES[metric_name](model=self._judge)
+            started = time.monotonic()
             try:
+                judge = self._get_judge()
+                metric = _METRIC_CLASSES[metric_name](model=judge)
                 await metric.a_measure(test_case, _show_indicator=False)
             except Exception as exc:  # noqa: BLE001 - DeepEval doesn't
                 # document a specific exception hierarchy for judge-call
-                # failures (network errors, malformed judge output, etc.);
-                # any failure here must degrade to EvaluationStatus.FAILED,
-                # never propagate and abort the other metrics for this
-                # response.
+                # failures (network errors, malformed judge output, judge
+                # construction failures, etc.); any failure here must
+                # degrade to EvaluationStatus.FAILED, never propagate and
+                # abort the other metrics for this response.
+                self._record_metrics(metric_name, EvaluationStatus.FAILED, started)
                 results.append(
                     MetricScore(
                         metric_name=metric_name,
@@ -89,6 +122,7 @@ class EvaluationService:
                     )
                 )
                 continue
+            self._record_metrics(metric_name, EvaluationStatus.SUCCESS, started)
             results.append(
                 MetricScore(
                     metric_name=metric_name,
@@ -105,3 +139,11 @@ class EvaluationService:
                 )
             )
         return results
+
+    @staticmethod
+    def _record_metrics(metric_name: MetricName, status: EvaluationStatus, started: float) -> None:
+        elapsed_seconds = time.monotonic() - started
+        JUDGE_EVAL_CALLS_TOTAL.labels(metric_name=metric_name.value, status=status.value).inc()
+        JUDGE_EVAL_DURATION_SECONDS.labels(metric_name=metric_name.value, status=status.value).observe(
+            elapsed_seconds
+        )

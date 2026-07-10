@@ -5,6 +5,7 @@ import litellm
 import openai
 
 from app.models.response import ResponseStatus
+from app.monitoring.metrics import LLM_PROVIDER_CALL_DURATION_SECONDS, LLM_PROVIDER_CALLS_TOTAL
 
 
 @dataclass
@@ -42,6 +43,7 @@ class LLMRunner:
                 timeout=self.timeout_seconds,
             )
         except litellm.exceptions.Timeout as exc:
+            self._record_metrics(provider_model, ResponseStatus.TIMEOUT, started)
             return RunResult(
                 status=ResponseStatus.TIMEOUT,
                 error_message=str(exc),
@@ -56,6 +58,7 @@ class LLMRunner:
             # by litellm's exception classes) is the actual shared base
             # covering all of them. Every one is isolated to this single
             # Response, never propagated to abort the rest of the batch.
+            self._record_metrics(provider_model, ResponseStatus.FAILED, started)
             return RunResult(
                 status=ResponseStatus.FAILED,
                 error_message=str(exc),
@@ -63,6 +66,7 @@ class LLMRunner:
             )
 
         latency_ms = self._elapsed_ms(started)
+        self._record_metrics(provider_model, ResponseStatus.SUCCESS, started)
         choice = response.choices[0]
         usage = response.usage
         return RunResult(
@@ -71,6 +75,14 @@ class LLMRunner:
             latency_ms=latency_ms,
             prompt_tokens=usage.prompt_tokens if usage else None,
             completion_tokens=usage.completion_tokens if usage else None,
+        )
+
+    @staticmethod
+    def _record_metrics(provider_model: str, status: ResponseStatus, started: float) -> None:
+        elapsed_seconds = time.monotonic() - started
+        LLM_PROVIDER_CALLS_TOTAL.labels(model=provider_model, status=status.value).inc()
+        LLM_PROVIDER_CALL_DURATION_SECONDS.labels(model=provider_model, status=status.value).observe(
+            elapsed_seconds
         )
 
     @staticmethod
