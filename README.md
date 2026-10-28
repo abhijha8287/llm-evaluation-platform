@@ -1,96 +1,90 @@
-LLM Evaluation Platform
+# LLM Evaluation Platform
 
-This project is a practical toolkit for evaluating language models. It helps you run repeatable tests, collect DeepEval metrics (faithfulness, bias, toxicity, relevancy), and compare models using blind arena matches and Elo ratings. Think of it as a small lab for model benchmarking and prompt regression testing.
+A toolkit for comparing language models across providers: automated DeepEval scoring, prompt regression tests and a blind pairwise arena with Elo rankings.
 
-Why this repo exists
+## Why this exists
+To run repeatable, comparable evaluations of LLMs instead of judging outputs by eye, and to keep a history of results so model or prompt changes can be checked against earlier runs.
 
-- Run real evaluations across providers (OpenAI, Anthropic, Gemini, LLaMA variants, etc.).
-- Automate scoring with DeepEval and keep a history of runs for comparisons.
-- Let humans and LLMs vote in blind pairwise arena matches and maintain Elo rankings.
-- Make it easy to run locally for demos or development.
+## What it does
+- Runs evaluation jobs against OpenAI, Anthropic, Gemini, Groq, Together and DeepSeek models through LiteLLM
+- Scores outputs with DeepEval metrics (faithfulness, relevancy, bias, toxicity) using a judge model
+- Runs prompt regression tests to catch quality drops
+- Blind pairwise arena: people or an LLM judge vote, and models get Elo ratings
+- Processes runs in parallel with Celery workers
+- Exposes Prometheus metrics with ready-made Grafana dashboards
+- Next.js frontend with leaderboard, run controls and arena
 
-What’s included (high level)
-
-- Backend (app/): FastAPI service, SQLAlchemy models, services, and route handlers.
-- Frontend (frontend/): Next.js app with leaderboards, run controls, and arena UI.
-- Workers (app/workers): Celery + Redis workers to run evaluations in parallel.
-- Migrations (migrations/): Alembic migration files.
-- Monitoring (monitoring/): Prometheus + Grafana provisioning for quick observability.
-
-Quick start (Docker, recommended)
-
-Prereqs: Docker, Docker Compose, Python 3.11, Node.js (18+)
-
-1) Prepare environment
-
-Windows PowerShell example:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-Copy-Item .env.example .env -Force
+## Project structure
+```
+llm-evaluation-platform/
+├── app/
+│   ├── api/            FastAPI route handlers
+│   ├── core/           Settings, auth, database, seed data
+│   ├── evaluation/     DeepEval scoring
+│   ├── llm/            LiteLLM provider calls
+│   ├── models/         SQLAlchemy tables
+│   ├── repositories/   Database access layer
+│   ├── services/       Runs, arena, Elo, regression, cost
+│   ├── workers/        Celery evaluation tasks
+│   ├── monitoring/     Prometheus metrics
+│   └── main.py         FastAPI entry point
+├── frontend/           Next.js dashboard
+├── migrations/         Alembic migrations
+├── monitoring/         Prometheus and Grafana config
+├── tests/              pytest suite
+├── docker-compose.yml  Postgres, Redis, API, worker, frontend, monitoring
+├── design-llm-evaluation-platform.md   Design document
+└── pyproject.toml      Python project and dependencies
 ```
 
-2) Bring up infra
+## Getting started
+Requirements: Docker and Docker Compose, Python 3.11+, Node.js 18+, at least one LLM provider key.
+```bash
+git clone https://github.com/abhijha8287/llm-evaluation-platform.git
+cd llm-evaluation-platform
+cp .env.example .env                    # add provider keys
+docker compose up -d                    # Postgres, Redis, Prometheus, Grafana
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+alembic upgrade head
+uvicorn app.main:app --reload --port 8000
+celery -A app.workers.celery_app worker --pool=solo --loglevel=info   # second terminal
+cd frontend && npm install && npm run dev                              # third terminal
+```
+| Service | Address |
+|:--|:--|
+| Frontend | http://localhost:3000 |
+| API and docs | http://localhost:8000/docs |
+| Prometheus | http://localhost:9090 |
+| Grafana | http://localhost:3001 |
 
-```powershell
-docker compose up -d
+A demo user and sample data are created on first run (see `app/main.py`).
+
+## Configuration
+| Variable | Purpose |
+|:--|:--|
+| `DATABASE_URL` | Postgres URL (SQLite works for quick tests) |
+| `REDIS_URL` | Redis for Celery |
+| `JWT_SECRET_KEY`, `JWT_ALGORITHM`, `JWT_EXPIRE_MINUTES` | API authentication |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`, `DEEPSEEK_API_KEY` | Provider keys (set the ones you use) |
+| `JUDGE_MODEL` | Model that scores outputs |
+| `MAX_RUNS_PER_DAY`, `DEFAULT_SAMPLE_SIZE` | Usage limits and defaults |
+| `CELERY_METRICS_PORT` | Worker metrics port |
+
+## Main endpoints
+| Method | Path | Purpose |
+|:--|:--|:--|
+| POST | `/runs` | Start an evaluation run |
+| GET | `/runs/{id}` | Run status and results |
+| GET | `/leaderboard` | Model rankings |
+| GET | `/arena/next-comparison` | Next blind comparison |
+| POST | `/arena/vote` | Submit a vote |
+| GET | `/metrics` | Prometheus metrics |
+
+## Tests
+```bash
+pytest
 ```
 
-3) Apply migrations
-
-```powershell
-.\.venv\Scripts\python -m pip install --upgrade pip
-.\.venv\Scripts\python -m pip install -r requirements.txt  # optional
-.\.venv\Scripts\python -m alembic upgrade head
-```
-
-4) Run the backend and worker
-
-API:
-
-```powershell
-.\.venv\Scripts\python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Worker:
-
-```powershell
-.\.venv\Scripts\python -m celery -A app.workers.celery_app worker --pool=solo --loglevel=info
-```
-
-5) Start the frontend (separate terminal)
-
-```powershell
-Set-Location frontend
-npm install
-npm run dev
-```
-
-Where to look in your browser
-
-- Frontend: http://localhost:3000
-- API & docs: http://localhost:8000 (try /docs)
-- Prometheus: http://localhost:9090
-- Grafana: http://localhost:3001
-
-Native (no Docker) notes
-
-- You can run Postgres and Redis locally and point DATABASE_URL and REDIS_URL in .env to them. For quick testing, a SQLite URL (sqlite+aiosqlite:///./dev.db) works, but avoid it for production.
-
-Seeds & demo account
-
-On first run the app seeds a demo user and sample data. Credentials (change them in app/main.py if you want):
-
-- demo@llm-eval-platform.dev / demo-password-change-me
-
-Common endpoints
-
-- POST /runs — start an evaluation run
-- GET /runs/{id} — check status and results
-- GET /leaderboard — model rankings
-- GET /arena/next-comparison — get a blind comparison to vote on
-- POST /arena/vote — submit a vote
-- GET /metrics — Prometheus metrics
-
-
+## Tech stack
+Python, FastAPI, SQLAlchemy, Alembic, PostgreSQL, Redis, Celery, LiteLLM, DeepEval, Prometheus, Grafana, Next.js, Docker
